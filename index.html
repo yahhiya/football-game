@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Physics Soccer — v1</title>
+<title>Physics Soccer — v2</title>
 <style>
   /* ---------- Basic page styling ---------- */
   body {
@@ -48,22 +48,24 @@
 </head>
 <body>
 
-<h1>⚽ Physics Soccer — v1</h1>
+<h1>⚽ Physics Soccer — v2</h1>
 <div id="hud">
-  <div>Blue: <span id="scoreLeft">0</span></div>
-  <div>Red: <span id="scoreRight">0</span></div>
+  <div>Blue (you): <span id="scoreLeft">0</span></div>
+  <div>Red (AI): <span id="scoreRight">0</span></div>
 </div>
 
 <canvas id="field" width="800" height="500"></canvas>
 
 <div id="instructions">
-  Move: WASD or Arrow Keys. Run into the ball to kick it — the harder you're
-  moving, the harder the kick. Score by knocking the ball into either goal.
+  <strong>Click the field once to give it keyboard focus</strong>, then use
+  WASD or Arrow Keys to move. Run into the ball to kick it — the harder
+  you're moving, the harder the kick. The red AI chases the ball too — beat
+  it there and out-muscle it to score.
 </div>
 
 <script>
 /* =====================================================================
-   PHYSICS SOCCER — V1
+   PHYSICS SOCCER — V2
    A minimal but "real" 2D physics sandbox. Every system here (vectors,
    friction, collision, game loop) is a building block you'll reuse in
    almost any 2D game. Read the comments — they explain the *why*, not
@@ -108,10 +110,32 @@ function gameLoop(now) {
    We track which keys are currently held down in a simple object/set.
    This lets you check "is W held right now" at any point in update(),
    rather than reacting only to single keypress events.
+
+   NOTE: the arrow keys normally scroll the page in a browser. If the
+   page (not our canvas) has focus, the browser can eat those keys
+   before our game ever sees them, which looks like "nothing happens".
+   preventDefault() below stops that, and focusing the canvas on click
+   makes sure keyboard input is actually going to our game.
    --------------------------------------------------------------------- */
 const keys = {};
-window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
-window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+
+window.addEventListener('keydown', e => {
+  const key = e.key.toLowerCase();
+  keys[key] = true;
+  if (MOVE_KEYS.includes(key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+// Make sure the canvas can receive focus, and grab it immediately and
+// on every click (in case the user clicked elsewhere on the page first).
+canvas.tabIndex = 0;
+canvas.style.outline = 'none';
+canvas.addEventListener('click', () => canvas.focus());
+window.addEventListener('load', () => canvas.focus());
+canvas.focus();
 
 /* ---------------------------------------------------------------------
    3. ENTITIES
@@ -125,6 +149,19 @@ const player = {
   radius: 16,
   speed: 220,       // pixels per second
   color: '#3fa7ff'
+};
+
+// The AI opponent is the same "shape" as the player (position, radius,
+// speed, velocity) so it can reuse the exact same collision/kick logic.
+// Only *how it decides to move* differs — that's the AI part.
+const opponent = {
+  x: FIELD_W / 2 + 150,
+  y: FIELD_H / 2,
+  vx: 0,
+  vy: 0,
+  radius: 16,
+  speed: 190,       // slightly slower than the player, so it's beatable
+  color: '#ff5b5b'
 };
 
 const ball = {
@@ -146,8 +183,11 @@ const FRICTION_PER_SECOND = 0.35; // fraction of speed lost per second
    --------------------------------------------------------------------- */
 function update(dt) {
   movePlayer(dt);
+  updateOpponentAI(dt);
   moveBall(dt);
-  handlePlayerBallCollision();
+  handleEntityBallCollision(player);
+  handleEntityBallCollision(opponent);
+  handleEntityCollision(player, opponent);
   handleGoals();
 }
 
@@ -176,6 +216,36 @@ function movePlayer(dt) {
   // Keep the player inside the field (simple clamping)
   player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
   player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
+}
+
+/* ---------------------------------------------------------------------
+   AI OPPONENT — "seek" steering behavior.
+   The simplest possible AI: figure out the direction from the opponent
+   to the ball, and move that way at full speed. This is called a
+   "seek" behavior and is the foundation almost every game AI builds on
+   top of (add obstacle avoidance, prediction, formations, etc. later).
+   --------------------------------------------------------------------- */
+function updateOpponentAI(dt) {
+  const dx = ball.x - opponent.x;
+  const dy = ball.y - opponent.y;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist > 1) {
+    // Normalized direction toward the ball
+    const nx = dx / dist;
+    const ny = dy / dist;
+    opponent.vx = nx * opponent.speed;
+    opponent.vy = ny * opponent.speed;
+  } else {
+    opponent.vx = 0;
+    opponent.vy = 0;
+  }
+
+  opponent.x += opponent.vx * dt;
+  opponent.y += opponent.vy * dt;
+
+  opponent.x = clamp(opponent.x, opponent.radius, FIELD_W - opponent.radius);
+  opponent.y = clamp(opponent.y, opponent.radius, FIELD_H - opponent.radius);
 }
 
 function moveBall(dt) {
@@ -221,29 +291,52 @@ function moveBall(dt) {
   }
 }
 
-function handlePlayerBallCollision() {
+function handleEntityBallCollision(entity) {
   // Classic circle-vs-circle collision: two circles overlap if the
   // distance between their centers is less than the sum of their radii.
-  const dx = ball.x - player.x;
-  const dy = ball.y - player.y;
+  // Written against a generic `entity` (with x, y, radius, vx, vy) so the
+  // exact same function works for the player AND the AI opponent — no
+  // copy-pasted logic to keep in sync.
+  const dx = ball.x - entity.x;
+  const dy = ball.y - entity.y;
   const dist = Math.hypot(dx, dy);
-  const minDist = player.radius + ball.radius;
+  const minDist = entity.radius + ball.radius;
 
   if (dist < minDist && dist > 0) {
-    // 1. Push the ball out so it doesn't overlap the player anymore
+    // 1. Push the ball out so it doesn't overlap the entity anymore
     const overlap = minDist - dist;
-    const nx = dx / dist; // normalized direction from player -> ball
+    const nx = dx / dist; // normalized direction from entity -> ball
     const ny = dy / dist;
     ball.x += nx * overlap;
     ball.y += ny * overlap;
 
-    // 2. "Kick" the ball: transfer some of the player's velocity into it,
+    // 2. "Kick" the ball: transfer some of the entity's velocity into it,
     // plus a push purely along the collision direction so it never feels
     // like the ball got stuck. This is a simplified impulse, not true
     // momentum conservation, but it feels good to play.
     const kickPower = 1.4;
-    ball.vx = nx * Math.hypot(player.vx, player.vy) * kickPower + player.vx * 0.3;
-    ball.vy = ny * Math.hypot(player.vx, player.vy) * kickPower + player.vy * 0.3;
+    ball.vx = nx * Math.hypot(entity.vx, entity.vy) * kickPower + entity.vx * 0.3;
+    ball.vy = ny * Math.hypot(entity.vx, entity.vy) * kickPower + entity.vy * 0.3;
+  }
+}
+
+function handleEntityCollision(a, b) {
+  // Simple solid-body separation between two entities (player vs AI),
+  // so they push each other apart instead of standing on top of each
+  // other. No velocity transfer here — just "don't overlap".
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.hypot(dx, dy);
+  const minDist = a.radius + b.radius;
+
+  if (dist < minDist && dist > 0) {
+    const overlap = (minDist - dist) / 2;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    a.x -= nx * overlap;
+    a.y -= ny * overlap;
+    b.x += nx * overlap;
+    b.y += ny * overlap;
   }
 }
 
@@ -269,6 +362,10 @@ function resetAfterGoal() {
   ball.vy = 0;
   player.x = FIELD_W / 2 - 150;
   player.y = FIELD_H / 2;
+  opponent.x = FIELD_W / 2 + 150;
+  opponent.y = FIELD_H / 2;
+  opponent.vx = 0;
+  opponent.vy = 0;
 }
 
 function clamp(value, min, max) {
@@ -286,6 +383,7 @@ function render() {
   drawField();
   drawCircle(ball.x, ball.y, ball.radius, ball.color, '#c9a86a');
   drawCircle(player.x, player.y, player.radius, player.color, '#1a4a7a');
+  drawCircle(opponent.x, opponent.y, opponent.radius, opponent.color, '#7a1a1a');
 }
 
 function drawField() {
@@ -302,13 +400,56 @@ function drawField() {
   ctx.arc(FIELD_W / 2, FIELD_H / 2, 50, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Goals (drawn as open-mouthed rectangles on each side)
-  ctx.fillStyle = 'rgba(255,255,255,0.15)';
-  ctx.fillRect(-20, GOAL_TOP, 20, GOAL_HEIGHT);
-  ctx.fillRect(FIELD_W, GOAL_TOP, 20, GOAL_HEIGHT);
+  // Goals: a post-and-net frame on each side, instead of a plain rectangle
+  drawGoal(true);
+  drawGoal(false);
+}
 
-  ctx.strokeRect(-20, GOAL_TOP, 20, GOAL_HEIGHT);
-  ctx.strokeRect(FIELD_W, GOAL_TOP, 20, GOAL_HEIGHT);
+const GOAL_DEPTH = 20; // how far the net extends outside the field
+
+function drawGoal(isLeft) {
+  // The net box sits *outside* the field boundary (negative x on the
+  // left, past FIELD_W on the right) so the ball visibly enters it.
+  const boxX = isLeft ? -GOAL_DEPTH : FIELD_W;
+  const frontX = isLeft ? 0 : FIELD_W; // the goal line itself, on the field edge
+
+  ctx.save();
+
+  // Net hatching (drawn first, underneath the frame)
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1;
+  const netSpacing = 8;
+  for (let gx = boxX; gx <= boxX + GOAL_DEPTH; gx += netSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(gx, GOAL_TOP);
+    ctx.lineTo(gx, GOAL_BOTTOM);
+    ctx.stroke();
+  }
+  for (let gy = GOAL_TOP; gy <= GOAL_BOTTOM; gy += netSpacing) {
+    ctx.beginPath();
+    ctx.moveTo(boxX, gy);
+    ctx.lineTo(boxX + GOAL_DEPTH, gy);
+    ctx.stroke();
+  }
+
+  // Frame: crossbar (top), back bar (bottom of net box), and back line
+  ctx.strokeStyle = '#eafaf0';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(boxX, GOAL_TOP, GOAL_DEPTH, GOAL_HEIGHT);
+
+  // Posts: thick circles at the goal line (front of net), like real
+  // goalpost cross-sections viewed from above
+  ctx.fillStyle = '#eafaf0';
+  ctx.strokeStyle = '#b7d8c5';
+  ctx.lineWidth = 1.5;
+  [GOAL_TOP, GOAL_BOTTOM].forEach(postY => {
+    ctx.beginPath();
+    ctx.arc(frontX, postY, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  });
+
+  ctx.restore();
 }
 
 function drawCircle(x, y, radius, fill, stroke) {
