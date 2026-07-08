@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Physics Soccer — v1</title>
+<style>
+  /* ---------- Basic page styling ---------- */
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #10231a;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    color: #eafaf0;
+  }
+
+  h1 {
+    margin: 12px 0 4px;
+    font-size: 22px;
+    letter-spacing: 1px;
+  }
+
+  #hud {
+    display: flex;
+    gap: 32px;
+    margin-bottom: 8px;
+    font-size: 18px;
+  }
+
+  #instructions {
+    margin-top: 8px;
+    font-size: 13px;
+    color: #9fcbb0;
+    max-width: 700px;
+    text-align: center;
+  }
+
+  canvas {
+    background: #2e7d4f;
+    border: 6px solid #eafaf0;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+</style>
+</head>
+<body>
+
+<h1>⚽ Physics Soccer — v1</h1>
+<div id="hud">
+  <div>Blue: <span id="scoreLeft">0</span></div>
+  <div>Red: <span id="scoreRight">0</span></div>
+</div>
+
+<canvas id="field" width="800" height="500"></canvas>
+
+<div id="instructions">
+  Move: WASD or Arrow Keys. Run into the ball to kick it — the harder you're
+  moving, the harder the kick. Score by knocking the ball into either goal.
+</div>
+
+<script>
+/* =====================================================================
+   PHYSICS SOCCER — V1
+   A minimal but "real" 2D physics sandbox. Every system here (vectors,
+   friction, collision, game loop) is a building block you'll reuse in
+   almost any 2D game. Read the comments — they explain the *why*, not
+   just the *what*.
+   ===================================================================== */
+
+const canvas = document.getElementById('field');
+const ctx = canvas.getContext('2d');
+
+const FIELD_W = canvas.width;
+const FIELD_H = canvas.height;
+
+// Goal mouths: a vertical gap in the left/right walls the ball can pass through
+const GOAL_HEIGHT = 140;
+const GOAL_TOP = (FIELD_H - GOAL_HEIGHT) / 2;
+const GOAL_BOTTOM = GOAL_TOP + GOAL_HEIGHT;
+
+let scoreLeft = 0;
+let scoreRight = 0;
+
+/* ---------------------------------------------------------------------
+   1. THE GAME LOOP
+   Every frame we: (1) read input, (2) update physics, (3) draw.
+   `dt` (delta time) is the seconds elapsed since the last frame. Using
+   dt instead of a fixed "move 3px per frame" means the game runs at the
+   same real-world speed whether the browser is doing 30fps or 144fps.
+   --------------------------------------------------------------------- */
+let lastTime = performance.now();
+
+function gameLoop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 1 / 30); // clamp avoids big jumps if tab was backgrounded
+  lastTime = now;
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(gameLoop);
+}
+
+/* ---------------------------------------------------------------------
+   2. INPUT HANDLING
+   We track which keys are currently held down in a simple object/set.
+   This lets you check "is W held right now" at any point in update(),
+   rather than reacting only to single keypress events.
+   --------------------------------------------------------------------- */
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+/* ---------------------------------------------------------------------
+   3. ENTITIES
+   The player and ball are both "circles with position + velocity".
+   Position and velocity are vectors — here we just use {x, y} objects
+   instead of a formal Vector2 class, to keep things readable.
+   --------------------------------------------------------------------- */
+const player = {
+  x: FIELD_W / 2 - 150,
+  y: FIELD_H / 2,
+  radius: 16,
+  speed: 220,       // pixels per second
+  color: '#3fa7ff'
+};
+
+const ball = {
+  x: FIELD_W / 2,
+  y: FIELD_H / 2,
+  vx: 0,            // velocity x (pixels/sec)
+  vy: 0,            // velocity y (pixels/sec)
+  radius: 10,
+  color: '#fff8dc'
+};
+
+// Friction: each second, velocity is multiplied by this factor.
+// 0 = instant stop, 1 = frictionless ice. 0.98-per-frame-ish feel,
+// but expressed properly per-second below.
+const FRICTION_PER_SECOND = 0.35; // fraction of speed lost per second
+
+/* ---------------------------------------------------------------------
+   4. UPDATE — all the physics and game logic lives here
+   --------------------------------------------------------------------- */
+function update(dt) {
+  movePlayer(dt);
+  moveBall(dt);
+  handlePlayerBallCollision();
+  handleGoals();
+}
+
+function movePlayer(dt) {
+  let dx = 0, dy = 0;
+  if (keys['w'] || keys['arrowup']) dy -= 1;
+  if (keys['s'] || keys['arrowdown']) dy += 1;
+  if (keys['a'] || keys['arrowleft']) dx -= 1;
+  if (keys['d'] || keys['arrowright']) dx += 1;
+
+  // Normalize diagonal movement so moving diagonally isn't faster
+  // (without this, dx=1,dy=1 gives speed*sqrt(2) instead of speed)
+  if (dx !== 0 || dy !== 0) {
+    const len = Math.hypot(dx, dy);
+    dx /= len;
+    dy /= len;
+  }
+
+  // Remember velocity for the kick calculation below
+  player.vx = dx * player.speed;
+  player.vy = dy * player.speed;
+
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  // Keep the player inside the field (simple clamping)
+  player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
+  player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
+}
+
+function moveBall(dt) {
+  // Apply friction: velocity shrinks toward zero over time.
+  // (1 - FRICTION_PER_SECOND) would be too abrupt per-frame, so we use
+  // an exponential decay based on dt for frame-rate independence.
+  const frictionFactor = Math.pow(1 - FRICTION_PER_SECOND, dt);
+  ball.vx *= frictionFactor;
+  ball.vy *= frictionFactor;
+
+  // Snap tiny velocities to zero so the ball actually rests instead of
+  // sliding imperceptibly forever
+  if (Math.hypot(ball.vx, ball.vy) < 2) {
+    ball.vx = 0;
+    ball.vy = 0;
+  }
+
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  // --- Wall collisions (top/bottom always solid) ---
+  if (ball.y - ball.radius < 0) {
+    ball.y = ball.radius;
+    ball.vy *= -0.7; // bounce, losing some energy (0.7 = "restitution")
+  }
+  if (ball.y + ball.radius > FIELD_H) {
+    ball.y = FIELD_H - ball.radius;
+    ball.vy *= -0.7;
+  }
+
+  // --- Left/right walls, EXCEPT where the goal gap is ---
+  const inGoalGapY = ball.y > GOAL_TOP && ball.y < GOAL_BOTTOM;
+
+  if (!inGoalGapY) {
+    if (ball.x - ball.radius < 0) {
+      ball.x = ball.radius;
+      ball.vx *= -0.7;
+    }
+    if (ball.x + ball.radius > FIELD_W) {
+      ball.x = FIELD_W - ball.radius;
+      ball.vx *= -0.7;
+    }
+  }
+}
+
+function handlePlayerBallCollision() {
+  // Classic circle-vs-circle collision: two circles overlap if the
+  // distance between their centers is less than the sum of their radii.
+  const dx = ball.x - player.x;
+  const dy = ball.y - player.y;
+  const dist = Math.hypot(dx, dy);
+  const minDist = player.radius + ball.radius;
+
+  if (dist < minDist && dist > 0) {
+    // 1. Push the ball out so it doesn't overlap the player anymore
+    const overlap = minDist - dist;
+    const nx = dx / dist; // normalized direction from player -> ball
+    const ny = dy / dist;
+    ball.x += nx * overlap;
+    ball.y += ny * overlap;
+
+    // 2. "Kick" the ball: transfer some of the player's velocity into it,
+    // plus a push purely along the collision direction so it never feels
+    // like the ball got stuck. This is a simplified impulse, not true
+    // momentum conservation, but it feels good to play.
+    const kickPower = 1.4;
+    ball.vx = nx * Math.hypot(player.vx, player.vy) * kickPower + player.vx * 0.3;
+    ball.vy = ny * Math.hypot(player.vx, player.vy) * kickPower + player.vy * 0.3;
+  }
+}
+
+function handleGoals() {
+  // Ball fully past the left edge, within the goal gap => right team scores
+  if (ball.x + ball.radius < 0) {
+    scoreRight++;
+    document.getElementById('scoreRight').textContent = scoreRight;
+    resetAfterGoal();
+  }
+  // Ball fully past the right edge => left team scores
+  if (ball.x - ball.radius > FIELD_W) {
+    scoreLeft++;
+    document.getElementById('scoreLeft').textContent = scoreLeft;
+    resetAfterGoal();
+  }
+}
+
+function resetAfterGoal() {
+  ball.x = FIELD_W / 2;
+  ball.y = FIELD_H / 2;
+  ball.vx = 0;
+  ball.vy = 0;
+  player.x = FIELD_W / 2 - 150;
+  player.y = FIELD_H / 2;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+/* ---------------------------------------------------------------------
+   5. RENDER — draw the current state. No game logic here, only drawing.
+   Keeping update() and render() separate is a habit worth keeping as
+   games get bigger: it stops physics bugs from turning into "is this a
+   drawing problem or a logic problem?" confusion.
+   --------------------------------------------------------------------- */
+function render() {
+  ctx.clearRect(0, 0, FIELD_W, FIELD_H);
+  drawField();
+  drawCircle(ball.x, ball.y, ball.radius, ball.color, '#c9a86a');
+  drawCircle(player.x, player.y, player.radius, player.color, '#1a4a7a');
+}
+
+function drawField() {
+  // Center line
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(FIELD_W / 2, 0);
+  ctx.lineTo(FIELD_W / 2, FIELD_H);
+  ctx.stroke();
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(FIELD_W / 2, FIELD_H / 2, 50, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Goals (drawn as open-mouthed rectangles on each side)
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  ctx.fillRect(-20, GOAL_TOP, 20, GOAL_HEIGHT);
+  ctx.fillRect(FIELD_W, GOAL_TOP, 20, GOAL_HEIGHT);
+
+  ctx.strokeRect(-20, GOAL_TOP, 20, GOAL_HEIGHT);
+  ctx.strokeRect(FIELD_W, GOAL_TOP, 20, GOAL_HEIGHT);
+}
+
+function drawCircle(x, y, radius, fill, stroke) {
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = stroke;
+  ctx.stroke();
+}
+
+// Kick everything off
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
