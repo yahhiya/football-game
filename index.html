@@ -53,7 +53,7 @@
   <div>Red (AI): <span id="scoreRight">0</span></div>
 </div>
 
-<canvas id="field" width="1080" height="460"></canvas>
+<canvas id="field" width="1000" height="500"></canvas>
 
 <div id="instructions">
   <strong>Click the field once to give it keyboard focus</strong>, then use
@@ -93,6 +93,12 @@ const GOAL_BOTTOM = GOAL_TOP + GOAL_HEIGHT;
 let scoreLeft = 0;
 let scoreRight = 0;
 
+// After a goal, we freeze gameplay briefly and reset everyone to slightly
+// staggered (not perfectly lined-up) positions. See the "why" note on
+// resetAfterGoal() below — this is what actually fixes the restart bug.
+let kickoffTimer = 0;
+const KICKOFF_FREEZE_SECONDS = 1;
+
 /* ---------------------------------------------------------------------
    THE PROJECTION (world -> screen)
 
@@ -112,10 +118,10 @@ let scoreRight = 0;
                 a perfectly vertical line on screen. That's what makes
                 the goalposts (and the players) "stand up straight".
    --------------------------------------------------------------------- */
-const TILT_Y = 0.55;
-const SHEAR_X = 0.35;
-const MARGIN_LEFT = 140;
-const MARGIN_TOP = 140;
+const TILT_Y = 0.75;
+const SHEAR_X = 0.16;
+const MARGIN_LEFT = 100;
+const MARGIN_TOP = 120;
 
 function project(wx, wy, wz = 0) {
   const depthShift = (wy - FIELD_H / 2) * SHEAR_X;
@@ -205,12 +211,25 @@ const FRICTION_PER_SECOND = 0.35;
    required zero changes below this line.
    --------------------------------------------------------------------- */
 function update(dt) {
+  if (kickoffTimer > 0) {
+    kickoffTimer = Math.max(0, kickoffTimer - dt);
+    return; // hold everyone in place during the kickoff pause
+  }
   movePlayer(dt);
   updateOpponentAI(dt);
   moveBall(dt);
   handleEntityBallCollision(player);
   handleEntityBallCollision(opponent);
   handleEntityCollision(player, opponent);
+
+  // handleEntityCollision can push either entity past the field boundary
+  // (it only knows about the other entity, not the walls) — re-clamp here
+  // so a shove near the edge can't shunt someone out of bounds.
+  player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
+  player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
+  opponent.x = clamp(opponent.x, opponent.radius, FIELD_W - opponent.radius);
+  opponent.y = clamp(opponent.y, opponent.radius, FIELD_H - opponent.radius);
+
   handleGoals();
 }
 
@@ -237,20 +256,48 @@ function movePlayer(dt) {
   player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
 }
 
+/* ---------------------------------------------------------------------
+   AI OPPONENT — "seek" blended with "separation" (classic steering
+   behaviors). Pure seek (v2) just walks straight at the ball, which
+   means it also walks straight through the player whenever they're in
+   the way — that's the "opponent just runs into me" feeling. Blending
+   in a separation force that pushes the AI away from the player when
+   they're close makes it curve around instead.
+   --------------------------------------------------------------------- */
 function updateOpponentAI(dt) {
-  const dx = ball.x - opponent.x;
-  const dy = ball.y - opponent.y;
-  const dist = Math.hypot(dx, dy);
+  const toBallX = ball.x - opponent.x;
+  const toBallY = ball.y - opponent.y;
+  const distBall = Math.hypot(toBallX, toBallY);
 
-  if (dist > 1) {
-    const nx = dx / dist;
-    const ny = dy / dist;
-    opponent.vx = nx * opponent.speed;
-    opponent.vy = ny * opponent.speed;
-  } else {
-    opponent.vx = 0;
-    opponent.vy = 0;
+  let seekX = 0, seekY = 0;
+  if (distBall > 1) {
+    seekX = toBallX / distBall;
+    seekY = toBallY / distBall;
   }
+
+  const awayX = opponent.x - player.x;
+  const awayY = opponent.y - player.y;
+  const distPlayer = Math.hypot(awayX, awayY);
+  const SEPARATION_RADIUS = opponent.radius + player.radius + 40;
+
+  let sepX = 0, sepY = 0;
+  if (distPlayer > 0 && distPlayer < SEPARATION_RADIUS) {
+    // Closer = stronger push away, so it only kicks in when actually crowded
+    const strength = 1 - distPlayer / SEPARATION_RADIUS;
+    sepX = (awayX / distPlayer) * strength;
+    sepY = (awayY / distPlayer) * strength;
+  }
+
+  let steerX = seekX + sepX * 1.3;
+  let steerY = seekY + sepY * 1.3;
+  const steerLen = Math.hypot(steerX, steerY);
+  if (steerLen > 0) {
+    steerX /= steerLen;
+    steerY /= steerLen;
+  }
+
+  opponent.vx = steerX * opponent.speed;
+  opponent.vy = steerY * opponent.speed;
 
   opponent.x += opponent.vx * dt;
   opponent.y += opponent.vy * dt;
@@ -345,16 +392,24 @@ function handleGoals() {
 }
 
 function resetAfterGoal() {
+  // BUG FIX: the old reset put the ball and both players dead-center on
+  // the exact same horizontal line as both goal mouths. That meant the
+  // very next AI-ball collision would send the ball dead straight
+  // through a goal again — it looked like the game "never restarted"
+  // because it kept re-scoring instantly. Staggering everyone off that
+  // line, plus a short freeze below, fixes it.
   ball.x = FIELD_W / 2;
   ball.y = FIELD_H / 2;
   ball.vx = 0;
   ball.vy = 0;
   player.x = FIELD_W / 2 - 150;
-  player.y = FIELD_H / 2;
+  player.y = FIELD_H / 2 - 60;
   opponent.x = FIELD_W / 2 + 150;
-  opponent.y = FIELD_H / 2;
+  opponent.y = FIELD_H / 2 + 60;
   opponent.vx = 0;
   opponent.vy = 0;
+
+  kickoffTimer = KICKOFF_FREEZE_SECONDS;
 }
 
 function clamp(value, min, max) {
@@ -372,6 +427,16 @@ function render() {
   drawGoal(true);
   drawGoal(false);
   drawEntitiesSorted();
+
+  if (kickoffTimer > 0) {
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#eafaf0';
+    ctx.font = 'bold 36px Segoe UI, Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Kickoff!', canvas.width / 2, canvas.height / 2);
+    ctx.textAlign = 'start';
+  }
 }
 
 // ---- Pitch (ground plane) ----
@@ -504,12 +569,34 @@ function drawEntitiesSorted() {
   // world Y, since Y is our depth axis) first, so nearer entities
   // correctly overlap farther ones instead of clipping through them.
   const items = [
-    { e: ball, h: BALL_VISUAL_HEIGHT },
-    { e: player, h: PLAYER_VISUAL_HEIGHT },
-    { e: opponent, h: PLAYER_VISUAL_HEIGHT }
+    { e: player, kind: 'player' },
+    { e: opponent, kind: 'player' },
+    { e: ball, kind: 'ball' }
   ].sort((a, b) => a.e.y - b.e.y);
 
-  items.forEach(item => drawStandingEntity(item.e, item.h));
+  items.forEach(item => {
+    if (item.kind === 'ball') drawBall(item.e);
+    else drawStandingEntity(item.e, PLAYER_VISUAL_HEIGHT);
+  });
+}
+
+// The ball just rolls on the ground — it doesn't need the "standing
+// figure" treatment (shadow + pole + raised body) that made it look
+// like a balloon floating on a string. A shadow plus a circle drawn at
+// a small fixed height reads as a rolling ball instead.
+function drawBall(entity) {
+  drawWorldCircleOutline(entity.x, entity.y, entity.radius * 0.8);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.fill();
+
+  const p = project(entity.x, entity.y, BALL_VISUAL_HEIGHT);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y, entity.radius, 0, Math.PI * 2);
+  ctx.fillStyle = entity.color;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = entity.dark;
+  ctx.stroke();
 }
 
 function drawStandingEntity(entity, visualHeight) {
