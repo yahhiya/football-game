@@ -176,10 +176,21 @@ const player = {
   y: FIELD_H / 2,
   vx: 0,
   vy: 0,
+  knockX: 0,
+  knockY: 0,
   radius: 16,
   speed: 220,
   color: '#3fa7ff',
-  dark: '#1a4a7a'
+  dark: '#1a4a7a',
+  // ---- Head Soccer-style look (see drawHead/drawBoot) ----
+  skin: '#e3a874',
+  hairColor: '#e8b23d',   // messy blonde
+  hairStyle: 'spiky',
+  browColor: '#7a5a2a',
+  eyeColor: '#3fae5c',    // green eyes
+  jerseyColor: '#3fa7ff',
+  bootColor: '#152233',
+  bootAccent: '#3fa7ff'
 };
 
 const opponent = {
@@ -187,10 +198,21 @@ const opponent = {
   y: FIELD_H / 2,
   vx: 0,
   vy: 0,
+  knockX: 0,
+  knockY: 0,
   radius: 16,
   speed: 190,
   color: '#ff5b5b',
-  dark: '#7a1a1a'
+  dark: '#7a1a1a',
+  // ---- Head Soccer-style look, deliberately different from the player ----
+  skin: '#d99a6c',
+  hairColor: '#241a12',   // dark, side-swept hair
+  hairStyle: 'side',
+  browColor: '#150f0a',
+  eyeColor: '#8a3b3b',    // brown-red eyes
+  jerseyColor: '#ff5b5b',
+  bootColor: '#1a1414',
+  bootAccent: '#ff5b5b'
 };
 
 const ball = {
@@ -219,7 +241,9 @@ function update(dt) {
   updateOpponentAI(dt);
   moveBall(dt);
   handleEntityBallCollision(player);
+  resolveBallWalls();
   handleEntityBallCollision(opponent);
+  resolveBallWalls();
   handleEntityCollision(player, opponent);
 
   // handleEntityCollision can push either entity past the field boundary
@@ -251,6 +275,8 @@ function movePlayer(dt) {
 
   player.x += player.vx * dt;
   player.y += player.vy * dt;
+
+  applyKnockback(player, dt);
 
   player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
   player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
@@ -302,8 +328,28 @@ function updateOpponentAI(dt) {
   opponent.x += opponent.vx * dt;
   opponent.y += opponent.vy * dt;
 
+  applyKnockback(opponent, dt);
+
   opponent.x = clamp(opponent.x, opponent.radius, FIELD_W - opponent.radius);
   opponent.y = clamp(opponent.y, opponent.radius, FIELD_H - opponent.radius);
+}
+
+// Knockback is tracked separately from normal movement/AI velocity so a
+// physical shove actually displaces someone for a moment, instead of
+// being erased the instant WASD input or the AI's own steering runs
+// again next frame. It decays on its own, like the ball's friction.
+const KNOCKBACK_FRICTION_PER_SECOND = 0.9; // fraction of knockback lost per second — fast, so it reads as a stagger, not a shove that lasts forever
+
+function applyKnockback(entity, dt) {
+  const decay = Math.pow(1 - KNOCKBACK_FRICTION_PER_SECOND, dt);
+  entity.knockX *= decay;
+  entity.knockY *= decay;
+  if (Math.hypot(entity.knockX, entity.knockY) < 2) {
+    entity.knockX = 0;
+    entity.knockY = 0;
+  }
+  entity.x += entity.knockX * dt;
+  entity.y += entity.knockY * dt;
 }
 
 function moveBall(dt) {
@@ -319,13 +365,28 @@ function moveBall(dt) {
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
 
+  resolveBallWalls();
+}
+
+// BUG FIX: this used to live only inside moveBall(). But
+// handleEntityBallCollision() can push the ball's position too (to
+// resolve overlap with a player), and that push had no idea where the
+// walls were. In a corner, the sequence was: moveBall() clamps the ball
+// just inside the wall -> a player standing right there immediately
+// shoves it back out past the wall via the *ball* collision -> next
+// frame moveBall() clamps it back in again -> repeat forever. The ball
+// looked permanently welded to the corner. Re-running this same wall
+// check after every collision (not just after normal movement) fixes
+// it: the ball can never end up outside the legal field no matter what
+// pushed it there.
+function resolveBallWalls() {
   if (ball.y - ball.radius < 0) {
     ball.y = ball.radius;
-    ball.vy *= -0.7;
+    ball.vy = Math.abs(ball.vy) * 0.7;
   }
   if (ball.y + ball.radius > FIELD_H) {
     ball.y = FIELD_H - ball.radius;
-    ball.vy *= -0.7;
+    ball.vy = -Math.abs(ball.vy) * 0.7;
   }
 
   const inGoalGapY = ball.y > GOAL_TOP && ball.y < GOAL_BOTTOM;
@@ -333,11 +394,11 @@ function moveBall(dt) {
   if (!inGoalGapY) {
     if (ball.x - ball.radius < 0) {
       ball.x = ball.radius;
-      ball.vx *= -0.7;
+      ball.vx = Math.abs(ball.vx) * 0.7;
     }
     if (ball.x + ball.radius > FIELD_W) {
       ball.x = FIELD_W - ball.radius;
-      ball.vx *= -0.7;
+      ball.vx = -Math.abs(ball.vx) * 0.7;
     }
   }
 }
@@ -375,6 +436,18 @@ function handleEntityCollision(a, b) {
     a.y -= ny * overlap;
     b.x += nx * overlap;
     b.y += ny * overlap;
+
+    // A real shove: whoever was moving faster into the other imparts a
+    // knockback impulse. Without this, "pushing" someone did nothing —
+    // they'd just get repositioned by the overlap fix, then immediately
+    // walk straight back since nothing ever displaced their velocity.
+    const KNOCK_STRENGTH = 0.55;
+    const aSpeed = Math.hypot(a.vx, a.vy);
+    const bSpeed = Math.hypot(b.vx, b.vy);
+    b.knockX += nx * aSpeed * KNOCK_STRENGTH;
+    b.knockY += ny * aSpeed * KNOCK_STRENGTH;
+    a.knockX -= nx * bSpeed * KNOCK_STRENGTH;
+    a.knockY -= ny * bSpeed * KNOCK_STRENGTH;
   }
 }
 
@@ -561,7 +634,8 @@ function drawNetPanel(topA, topB, botA, botB, steps) {
 }
 
 // ---- Entities: ball, player, opponent, all drawn "standing" on the pitch ----
-const PLAYER_VISUAL_HEIGHT = 34;
+const HEAD_HEIGHT = 48;   // how high the head floats above the ground, in world units
+const BOOT_HEIGHT = 14;   // how high the boot floats above the ground (the visible "gap")
 const BALL_VISUAL_HEIGHT = 8;
 
 function drawEntitiesSorted() {
@@ -576,14 +650,12 @@ function drawEntitiesSorted() {
 
   items.forEach(item => {
     if (item.kind === 'ball') drawBall(item.e);
-    else drawStandingEntity(item.e, PLAYER_VISUAL_HEIGHT);
+    else drawCharacter(item.e);
   });
 }
 
-// The ball just rolls on the ground — it doesn't need the "standing
-// figure" treatment (shadow + pole + raised body) that made it look
-// like a balloon floating on a string. A shadow plus a circle drawn at
-// a small fixed height reads as a rolling ball instead.
+// The ball just rolls on the ground — a shadow plus a circle drawn at a
+// small fixed height reads as a rolling ball, no extra decoration needed.
 function drawBall(entity) {
   drawWorldCircleOutline(entity.x, entity.y, entity.radius * 0.8);
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
@@ -599,33 +671,234 @@ function drawBall(entity) {
   ctx.stroke();
 }
 
-function drawStandingEntity(entity, visualHeight) {
-  // Ground shadow, flattened by the same projection as the pitch, so it
-  // always looks glued to the ground regardless of camera angle.
-  drawWorldCircleOutline(entity.x, entity.y, entity.radius * 0.9);
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+/* =======================================================================
+   "HEAD SOCCER" STYLE CHARACTER — giant head directly above a floating
+   boot, no body in between. Everything below is drawn with plain canvas
+   primitives (arcs, ellipses, paths, rounded rects) — no image assets.
+
+   IMPORTANT — why these look "vertically upright" on a tilted pitch:
+   project(entity.x, entity.y, height) collapses the whole character down
+   to a single 2D screen point (screenX, screenY). Every shape below is
+   then drawn as ordinary, un-skewed 2D canvas art *around that one
+   point* — eyebrows, hair, boot laces, all of it. None of those shapes
+   are individually run back through the world projection, so none of
+   them inherit the pitch's shear or squash. That's what keeps the
+   characters looking like flat, upright cutouts standing on a tilted
+   floor, instead of leaning with the camera angle.
+   ======================================================================= */
+function drawCharacter(entity) {
+  // Ground shadow first, so everything else draws on top of it
+  drawWorldCircleOutline(entity.x, entity.y, entity.radius * 1.1);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
   ctx.fill();
 
-  const base = project(entity.x, entity.y, 0);
-  const top = project(entity.x, entity.y, visualHeight);
+  const bootAnchor = project(entity.x, entity.y, BOOT_HEIGHT);
+  const headAnchor = project(entity.x, entity.y, HEAD_HEIGHT);
 
-  // A thin "pole" connecting the shadow to the body — this is what
-  // actually sells the height/standing effect.
-  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(base.x, base.y);
-  ctx.lineTo(top.x, top.y);
-  ctx.stroke();
+  drawBoot(bootAnchor.x, bootAnchor.y, entity);
+  drawHead(headAnchor.x, headAnchor.y, entity);
+}
 
-  // Body
+// Small helper: a rounded rectangle path, since not every browser
+// supports ctx.roundRect() yet.
+function roundRectPath(x, y, w, h, r) {
   ctx.beginPath();
-  ctx.arc(top.x, top.y, entity.radius, 0, Math.PI * 2);
-  ctx.fillStyle = entity.color;
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawBoot(cx, cy, entity) {
+  const w = entity.radius * 2.7;
+  const h = entity.radius * 1.4;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Sole
+  ctx.fillStyle = '#141414';
+  roundRectPath(-w * 0.5, h * 0.22, w, h * 0.24, h * 0.1);
+  ctx.fill();
+
+  // Main boot body
+  ctx.beginPath();
+  ctx.ellipse(0, 0, w * 0.5, h * 0.42, 0, 0, Math.PI * 2);
+  ctx.fillStyle = entity.bootColor;
   ctx.fill();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = entity.dark;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
   ctx.stroke();
+
+  // Ankle cuff
+  roundRectPath(-w * 0.16, -h * 0.85, w * 0.32, h * 0.55, w * 0.08);
+  ctx.fillStyle = entity.bootColor;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.stroke();
+
+  // Team-colored accent stripe
+  ctx.strokeStyle = entity.bootAccent;
+  ctx.lineWidth = Math.max(2, h * 0.14);
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.34, -h * 0.02);
+  ctx.lineTo(w * 0.34, -h * 0.02);
+  ctx.stroke();
+
+  // Laces
+  ctx.strokeStyle = '#f4f4f4';
+  ctx.lineWidth = 1.5;
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * w * 0.09 - w * 0.05, -h * 0.55);
+    ctx.lineTo(i * w * 0.09 + w * 0.05, -h * 0.22);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawHead(cx, cy, entity) {
+  const R = entity.radius * 1.9;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // Jersey collar, peeking out beneath the chin (drawn first so the
+  // head overlaps the top of it, like a neck emerging from a shirt)
+  roundRectPath(-R * 0.55, R * 0.55, R * 1.1, R * 0.55, R * 0.15);
+  ctx.fillStyle = entity.jerseyColor;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.stroke();
+
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-R * 0.2, R * 0.55);
+  ctx.lineTo(0, R * 0.82);
+  ctx.lineTo(R * 0.2, R * 0.55);
+  ctx.stroke();
+
+  // Ears
+  ctx.fillStyle = entity.skin;
+  [-1, 1].forEach(side => {
+    ctx.beginPath();
+    ctx.ellipse(side * R * 0.92, R * 0.05, R * 0.18, R * 0.24, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.stroke();
+  });
+
+  // Head
+  ctx.beginPath();
+  ctx.arc(0, 0, R, 0, Math.PI * 2);
+  ctx.fillStyle = entity.skin;
+  ctx.fill();
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.stroke();
+
+  drawHair(entity, R);
+
+  // Eyebrows, angled inward for an intense "game face"
+  ctx.strokeStyle = entity.browColor;
+  ctx.lineWidth = R * 0.14;
+  ctx.lineCap = 'round';
+  [-1, 1].forEach(side => {
+    ctx.beginPath();
+    ctx.moveTo(side * R * 0.14, -R * 0.1);
+    ctx.lineTo(side * R * 0.5, -R * 0.3);
+    ctx.stroke();
+  });
+
+  // Eyes
+  [-1, 1].forEach(side => {
+    ctx.beginPath();
+    ctx.ellipse(side * R * 0.35, R * 0.03, R * 0.16, R * 0.12, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(side * R * 0.37, R * 0.04, R * 0.07, 0, Math.PI * 2);
+    ctx.fillStyle = entity.eyeColor;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(side * R * 0.37, R * 0.04, R * 0.03, 0, Math.PI * 2);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+  });
+
+  // Nose
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(0, R * 0.1);
+  ctx.lineTo(-R * 0.05, R * 0.3);
+  ctx.lineTo(R * 0.05, R * 0.3);
+  ctx.stroke();
+
+  // Mouth: open, shouting — matches the "game face" energy of the style
+  ctx.beginPath();
+  ctx.ellipse(0, R * 0.5, R * 0.26, R * 0.13, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#5c2020';
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  roundRectPath(-R * 0.2, R * 0.4, R * 0.4, R * 0.09, R * 0.03);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHair(entity, R) {
+  ctx.fillStyle = entity.hairColor;
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+
+  if (entity.hairStyle === 'spiky') {
+    // Messy spiked-up tufts across the top of the head
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.9, -R * 0.3);
+    const spikes = 6;
+    for (let i = 0; i <= spikes; i++) {
+      const t = i / spikes;
+      const x = -R * 0.9 + t * R * 1.8;
+      const y = -R * 0.75 - (i % 2 === 0 ? R * 0.25 : R * 0.05);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(R * 0.9, -R * 0.05);
+    ctx.quadraticCurveTo(0, -R * 0.5, -R * 0.9, -R * 0.3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    // Side-swept hair, sweeping from a high point down over one side
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.85, 0);
+    ctx.quadraticCurveTo(-R * 0.9, -R * 0.85, -R * 0.1, -R * 0.85);
+    ctx.quadraticCurveTo(R * 0.75, -R * 0.85, R * 0.85, -R * 0.2);
+    ctx.quadraticCurveTo(R * 0.5, -R * 0.45, R * 0.1, -R * 0.55);
+    ctx.quadraticCurveTo(-R * 0.3, -R * 0.6, -R * 0.6, -R * 0.25);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
 }
 
 // Kick everything off
