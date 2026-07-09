@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Physics Soccer — v3 (2.5D)</title>
+<title>Head Soccer — v4 (2D side view)</title>
 <style>
   body {
     margin: 0;
@@ -38,7 +38,7 @@
   }
 
   canvas {
-    background: #163a25;
+    background: #0d2a1c;
     border: 6px solid #eafaf0;
     border-radius: 6px;
     box-shadow: 0 8px 24px rgba(0,0,0,0.4);
@@ -47,92 +47,68 @@
 </head>
 <body>
 
-<h1>⚽ Physics Soccer — v3 (2.5D)</h1>
+<h1>⚽ Head Soccer — v4 (2D side view)</h1>
 <div id="hud">
   <div>Blue (you): <span id="scoreLeft">0</span></div>
   <div>Red (AI): <span id="scoreRight">0</span></div>
 </div>
 
-<canvas id="field" width="1000" height="500"></canvas>
+<canvas id="field" width="900" height="500"></canvas>
 
 <div id="instructions">
-  <strong>Click the field once to give it keyboard focus</strong>, then use
-  WASD or Arrow Keys to move. Run into the ball to kick it. The red AI
-  chases the ball too — beat it there and out-muscle it to score.
+  <strong>Click the field once to give it keyboard focus.</strong>
+  A/D or Left/Right to move. W, Up, or Space to jump. Headbutt or kick the
+  ball into the opponent's goal.
 </div>
 
 <script>
 /* =====================================================================
-   PHYSICS SOCCER — V3 (2.5D / oblique projection camera)
+   HEAD SOCCER — V4 (flat 2D side view, gravity-based physics)
 
-   THE BIG IDEA OF THIS VERSION:
-   The physics simulation (positions, velocities, collisions) still runs
-   entirely in flat, simple 2D "world" coordinates — nothing about
-   movePlayer(), moveBall(), or the collision functions changes at all
-   from v2. All we're adding is a PROJECTION step: a function that takes
-   a world coordinate (and an optional height) and decides where that
-   point should actually be drawn on screen.
-
-   This separation — "simulation space" vs "render space" — is one of
-   the most useful ideas in game dev. It's *why* we can bolt a totally
-   different camera onto an already-working game without touching the
-   game logic.
+   BIG CHANGE FROM V3: this version has no camera projection at all. In
+   v3 we had to invent project(x, y, height) to fake a tilted 3D-ish
+   camera. Here the game genuinely IS 2D and side-on, so world
+   coordinates and screen coordinates are (almost) the same thing — the
+   only conversion left is flipping "height above the ground" into a
+   screen Y, since height counts UP but screen Y counts DOWN. That's it.
+   Everything else got simpler, not more complex, by matching the
+   camera to the game instead of faking one.
    ===================================================================== */
 
 const canvas = document.getElementById('field');
 const ctx = canvas.getContext('2d');
 
-// ---- WORLD SPACE (unchanged from v2 — this is what the physics uses) ----
-const FIELD_W = 800;
-const FIELD_H = 500;
+const CANVAS_W = canvas.width;
+const CANVAS_H = canvas.height;
 
-const GOAL_HEIGHT = 140; // gap in the goal line, in world units
-const GOAL_TOP = (FIELD_H - GOAL_HEIGHT) / 2;
-const GOAL_BOTTOM = GOAL_TOP + GOAL_HEIGHT;
+// ---- The pitch, in plain screen coordinates ----
+const GROUND_Y = 420;          // the horizontal line everything stands on
+const GOAL_X_LEFT = 90;        // left goal line (x position)
+const GOAL_X_RIGHT = 810;      // right goal line (x position)
+const GOAL_HEIGHT = 170;       // how tall the goal opening is
+const GOAL_NET_DEPTH = 55;     // how far the net extends behind the goal line
+const CEILING_H = GROUND_Y - 30; // soft ceiling so nothing flies off-canvas forever
 
 let scoreLeft = 0;
 let scoreRight = 0;
 
-// After a goal, we freeze gameplay briefly and reset everyone to slightly
-// staggered (not perfectly lined-up) positions. See the "why" note on
-// resetAfterGoal() below — this is what actually fixes the restart bug.
 let kickoffTimer = 0;
 const KICKOFF_FREEZE_SECONDS = 1;
 
 /* ---------------------------------------------------------------------
-   THE PROJECTION (world -> screen)
-
-   We fake a tilted camera with a simple "oblique projection":
-     - TILT_Y   squashes the pitch's depth axis (world Y), which is what
-                makes a flat rectangle read as "receding into the
-                distance" instead of a plain bird's-eye view.
-     - SHEAR_X  shifts points sideways based on how far along the depth
-                axis they are, turning the pitch into a slanted
-                parallelogram instead of a flat rectangle — this is the
-                actual "isometric-ish" part.
-     - height (wz) simply moves a point straight UP on screen, with no
-                shear and no squash. That's the key trick: because a
-                post's base and its top share the same world x/y, they
-                only differ in wz, which means they land at the exact
-                same screenX — so every vertical in the world renders as
-                a perfectly vertical line on screen. That's what makes
-                the goalposts (and the players) "stand up straight".
+   HEIGHT <-> SCREEN CONVERSION
+   Every entity tracks a "height above ground" (h), where 0 = standing
+   on the ground and larger = higher in the air. Gravity just subtracts
+   from vertical velocity every frame — no different from any falling-
+   body physics problem. To actually draw something we flip it into a
+   screen Y coordinate once, right before drawing.
    --------------------------------------------------------------------- */
-const TILT_Y = 0.75;
-const SHEAR_X = 0.16;
-const MARGIN_LEFT = 100;
-const MARGIN_TOP = 120;
-
-function project(wx, wy, wz = 0) {
-  const depthShift = (wy - FIELD_H / 2) * SHEAR_X;
-  return {
-    x: MARGIN_LEFT + wx + depthShift,
-    y: MARGIN_TOP + wy * TILT_Y - wz
-  };
+function groundToScreenY(h) {
+  return GROUND_Y - h;
 }
 
 /* ---------------------------------------------------------------------
-   1. THE GAME LOOP (identical to v2)
+   1. THE GAME LOOP (unchanged pattern from v2/v3)
    --------------------------------------------------------------------- */
 let lastTime = performance.now();
 
@@ -147,10 +123,12 @@ function gameLoop(now) {
 }
 
 /* ---------------------------------------------------------------------
-   2. INPUT HANDLING (identical to v2)
+   2. INPUT HANDLING
+   Only three actions now: move left, move right, jump. Jump uses W,
+   Up, or Space so whichever feels natural to your hand works.
    --------------------------------------------------------------------- */
 const keys = {};
-const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
+const MOVE_KEYS = ['a', 'd', 'arrowleft', 'arrowright', 'w', 'arrowup', ' '];
 
 window.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
@@ -168,296 +146,316 @@ window.addEventListener('load', () => canvas.focus());
 canvas.focus();
 
 /* ---------------------------------------------------------------------
-   3. ENTITIES — still plain world-space objects, exactly like v2.
-   Nothing here knows or cares that the camera is tilted.
+   3. ENTITIES
+   x        — horizontal position (the only axis players move under
+              their own power)
+   h        — height above the ground (0 = grounded)
+   vx, vh   — horizontal and vertical velocity
+   grounded — true when h === 0, used to decide "can I jump right now?"
+   knockX   — a separate horizontal "shove" velocity from collisions,
+              decays on its own (same idea as v3's knockback system)
+   radius   — a scale factor the head/boot drawing code uses; also
+              doubles as the shadow size
    --------------------------------------------------------------------- */
 const player = {
-  x: FIELD_W / 2 - 150,
-  y: FIELD_H / 2,
+  x: GOAL_X_LEFT + 180,
+  h: 0,
   vx: 0,
-  vy: 0,
+  vh: 0,
+  grounded: true,
   knockX: 0,
-  knockY: 0,
   radius: 16,
-  speed: 220,
-  color: '#3fa7ff',
-  dark: '#1a4a7a',
-  // ---- Head Soccer-style look (see drawHead/drawBoot) ----
+  speed: 260,
   skin: '#e3a874',
-  hairColor: '#e8b23d',   // messy blonde
+  hairColor: '#e8b23d',
   hairStyle: 'spiky',
   browColor: '#7a5a2a',
-  eyeColor: '#3fae5c',    // green eyes
+  eyeColor: '#3fae5c',
   jerseyColor: '#3fa7ff',
   bootColor: '#152233',
   bootAccent: '#3fa7ff'
 };
 
 const opponent = {
-  x: FIELD_W / 2 + 150,
-  y: FIELD_H / 2,
+  x: GOAL_X_RIGHT - 180,
+  h: 0,
   vx: 0,
-  vy: 0,
+  vh: 0,
+  grounded: true,
   knockX: 0,
-  knockY: 0,
   radius: 16,
-  speed: 190,
-  color: '#ff5b5b',
-  dark: '#7a1a1a',
-  // ---- Head Soccer-style look, deliberately different from the player ----
+  speed: 230,
   skin: '#d99a6c',
-  hairColor: '#241a12',   // dark, side-swept hair
+  hairColor: '#241a12',
   hairStyle: 'side',
   browColor: '#150f0a',
-  eyeColor: '#8a3b3b',    // brown-red eyes
+  eyeColor: '#8a3b3b',
   jerseyColor: '#ff5b5b',
   bootColor: '#1a1414',
   bootAccent: '#ff5b5b'
 };
 
 const ball = {
-  x: FIELD_W / 2,
-  y: FIELD_H / 2,
+  x: CANVAS_W / 2,
+  h: 220,
   vx: 0,
-  vy: 0,
-  radius: 10,
+  vh: 0,
+  radius: 15,
   color: '#fff8dc',
   dark: '#c9a86a'
 };
 
-const FRICTION_PER_SECOND = 0.35;
+// ---- Tuning constants ----
+const GRAVITY_PLAYER = 1600;
+const JUMP_VELOCITY = 620;
+
+const GRAVITY_BALL = 1300;
+const BALL_GROUND_RESTITUTION = 0.62; // how much bounce energy survives hitting the ground
+const BALL_WALL_RESTITUTION = 0.55;
+const BALL_AIR_DRAG_PER_SECOND = 0.05;    // very light — the ball should carry through the air
+const BALL_GROUND_FRICTION_PER_SECOND = 0.5;
+
+const HEAD_COLLISION_RADIUS = 30;
+const BOOT_COLLISION_RADIUS = 18;
+const HEAD_OFFSET = 78;  // how far above the feet the head sits
+const BOOT_OFFSET = 8;   // how far above the feet the boot's kicking point sits
+
+const KNOCKBACK_FRICTION_PER_SECOND = 0.9;
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
 /* ---------------------------------------------------------------------
-   4. UPDATE — 100% identical logic to v2. This is the payoff of having
-   kept physics and rendering separate: swapping the whole camera model
-   required zero changes below this line.
+   4. UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
   if (kickoffTimer > 0) {
     kickoffTimer = Math.max(0, kickoffTimer - dt);
-    return; // hold everyone in place during the kickoff pause
+    // Let the ball keep falling during the kickoff pause — it visibly
+    // drops in and settles, like a real kickoff, while players hold.
+    moveBall(dt);
+    return;
   }
+
   movePlayer(dt);
   updateOpponentAI(dt);
   moveBall(dt);
+
   handleEntityBallCollision(player);
   resolveBallWalls();
   handleEntityBallCollision(opponent);
   resolveBallWalls();
-  handleEntityCollision(player, opponent);
 
-  // handleEntityCollision can push either entity past the field boundary
-  // (it only knows about the other entity, not the walls) — re-clamp here
-  // so a shove near the edge can't shunt someone out of bounds.
-  player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
-  player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
-  opponent.x = clamp(opponent.x, opponent.radius, FIELD_W - opponent.radius);
-  opponent.y = clamp(opponent.y, opponent.radius, FIELD_H - opponent.radius);
+  handleBodyCollision(player, opponent);
+  player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
+  opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 
   handleGoals();
 }
 
 function movePlayer(dt) {
-  let dx = 0, dy = 0;
-  if (keys['w'] || keys['arrowup']) dy -= 1;
-  if (keys['s'] || keys['arrowdown']) dy += 1;
-  if (keys['a'] || keys['arrowleft']) dx -= 1;
-  if (keys['d'] || keys['arrowright']) dx += 1;
+  let dir = 0;
+  if (keys['a'] || keys['arrowleft']) dir -= 1;
+  if (keys['d'] || keys['arrowright']) dir += 1;
 
-  if (dx !== 0 || dy !== 0) {
-    const len = Math.hypot(dx, dy);
-    dx /= len;
-    dy /= len;
+  player.vx = dir * player.speed;
+  player.x += player.vx * dt;
+
+  if ((keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
+    player.vh = JUMP_VELOCITY;
+    player.grounded = false;
   }
 
-  player.vx = dx * player.speed;
-  player.vy = dy * player.speed;
-
-  player.x += player.vx * dt;
-  player.y += player.vy * dt;
-
+  applyGravity(player, dt);
   applyKnockback(player, dt);
 
-  player.x = clamp(player.x, player.radius, FIELD_W - player.radius);
-  player.y = clamp(player.y, player.radius, FIELD_H - player.radius);
+  player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
 }
 
 /* ---------------------------------------------------------------------
-   AI OPPONENT — "seek" blended with "separation" (classic steering
-   behaviors). Pure seek (v2) just walks straight at the ball, which
-   means it also walks straight through the player whenever they're in
-   the way — that's the "opponent just runs into me" feeling. Blending
-   in a separation force that pushes the AI away from the player when
-   they're close makes it curve around instead.
+   AI OPPONENT — seek the ball horizontally, jump when it's close and
+   up in the air, and steer away from the player when crowded (same
+   "seek + separation" blend as v3, just collapsed to one axis).
    --------------------------------------------------------------------- */
 function updateOpponentAI(dt) {
   const toBallX = ball.x - opponent.x;
-  const toBallY = ball.y - opponent.y;
-  const distBall = Math.hypot(toBallX, toBallY);
-
-  let seekX = 0, seekY = 0;
-  if (distBall > 1) {
-    seekX = toBallX / distBall;
-    seekY = toBallY / distBall;
-  }
+  let desiredDir = 0;
+  if (Math.abs(toBallX) > 4) desiredDir = Math.sign(toBallX);
 
   const awayX = opponent.x - player.x;
-  const awayY = opponent.y - player.y;
-  const distPlayer = Math.hypot(awayX, awayY);
-  const SEPARATION_RADIUS = opponent.radius + player.radius + 40;
-
-  let sepX = 0, sepY = 0;
-  if (distPlayer > 0 && distPlayer < SEPARATION_RADIUS) {
-    // Closer = stronger push away, so it only kicks in when actually crowded
-    const strength = 1 - distPlayer / SEPARATION_RADIUS;
-    sepX = (awayX / distPlayer) * strength;
-    sepY = (awayY / distPlayer) * strength;
+  const distPlayer = Math.abs(awayX);
+  const SEPARATION_RANGE = opponent.radius + player.radius + 34;
+  let sepDir = 0;
+  if (distPlayer > 0 && distPlayer < SEPARATION_RANGE) {
+    sepDir = Math.sign(awayX) * (1 - distPlayer / SEPARATION_RANGE);
   }
 
-  let steerX = seekX + sepX * 1.3;
-  let steerY = seekY + sepY * 1.3;
-  const steerLen = Math.hypot(steerX, steerY);
-  if (steerLen > 0) {
-    steerX /= steerLen;
-    steerY /= steerLen;
-  }
-
-  opponent.vx = steerX * opponent.speed;
-  opponent.vy = steerY * opponent.speed;
-
+  let steer = clamp(desiredDir + sepDir * 1.3, -1, 1);
+  opponent.vx = steer * opponent.speed;
   opponent.x += opponent.vx * dt;
-  opponent.y += opponent.vy * dt;
 
+  const ballIsClose = Math.abs(ball.x - opponent.x) < 70;
+  const ballIsUp = ball.h > 50;
+  if (ballIsClose && ballIsUp && opponent.grounded) {
+    opponent.vh = JUMP_VELOCITY;
+    opponent.grounded = false;
+  }
+
+  applyGravity(opponent, dt);
   applyKnockback(opponent, dt);
 
-  opponent.x = clamp(opponent.x, opponent.radius, FIELD_W - opponent.radius);
-  opponent.y = clamp(opponent.y, opponent.radius, FIELD_H - opponent.radius);
+  opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
-// Knockback is tracked separately from normal movement/AI velocity so a
-// physical shove actually displaces someone for a moment, instead of
-// being erased the instant WASD input or the AI's own steering runs
-// again next frame. It decays on its own, like the ball's friction.
-const KNOCKBACK_FRICTION_PER_SECOND = 0.9; // fraction of knockback lost per second — fast, so it reads as a stagger, not a shove that lasts forever
+// Shared by player and AI: fall under gravity, land on the ground.
+function applyGravity(entity, dt) {
+  entity.vh -= GRAVITY_PLAYER * dt;
+  entity.h += entity.vh * dt;
 
+  if (entity.h <= 0) {
+    entity.h = 0;
+    entity.vh = 0;
+    entity.grounded = true;
+  } else {
+    entity.grounded = false;
+  }
+}
+
+// Knockback: a separate "shove" velocity so a body collision can
+// actually displace someone, instead of being instantly overwritten by
+// their own WASD input or AI steering next frame.
 function applyKnockback(entity, dt) {
   const decay = Math.pow(1 - KNOCKBACK_FRICTION_PER_SECOND, dt);
   entity.knockX *= decay;
-  entity.knockY *= decay;
-  if (Math.hypot(entity.knockX, entity.knockY) < 2) {
-    entity.knockX = 0;
-    entity.knockY = 0;
-  }
+  if (Math.abs(entity.knockX) < 2) entity.knockX = 0;
   entity.x += entity.knockX * dt;
-  entity.y += entity.knockY * dt;
 }
 
 function moveBall(dt) {
-  const frictionFactor = Math.pow(1 - FRICTION_PER_SECOND, dt);
-  ball.vx *= frictionFactor;
-  ball.vy *= frictionFactor;
+  ball.vh -= GRAVITY_BALL * dt;
 
-  if (Math.hypot(ball.vx, ball.vy) < 2) {
-    ball.vx = 0;
-    ball.vy = 0;
+  if (ball.h > 0) {
+    // Light air resistance — the ball should carry through its arc
+    const airDrag = Math.pow(1 - BALL_AIR_DRAG_PER_SECOND, dt);
+    ball.vx *= airDrag;
+  } else {
+    // Rolling friction once it's on the ground
+    const groundFriction = Math.pow(1 - BALL_GROUND_FRICTION_PER_SECOND, dt);
+    ball.vx *= groundFriction;
+    if (Math.abs(ball.vx) < 2) ball.vx = 0;
   }
 
   ball.x += ball.vx * dt;
-  ball.y += ball.vy * dt;
+  ball.h += ball.vh * dt;
 
   resolveBallWalls();
 }
 
-// BUG FIX: this used to live only inside moveBall(). But
-// handleEntityBallCollision() can push the ball's position too (to
-// resolve overlap with a player), and that push had no idea where the
-// walls were. In a corner, the sequence was: moveBall() clamps the ball
-// just inside the wall -> a player standing right there immediately
-// shoves it back out past the wall via the *ball* collision -> next
-// frame moveBall() clamps it back in again -> repeat forever. The ball
-// looked permanently welded to the corner. Re-running this same wall
-// check after every collision (not just after normal movement) fixes
-// it: the ball can never end up outside the legal field no matter what
-// pushed it there.
+// LESSON CARRIED OVER FROM V3: any function that can move the ball
+// needs to re-check the walls/ground afterward, or two different
+// pieces of collision code can fight each other and pin the ball
+// somewhere illegal (that was the "stuck in the corner" bug last time).
+// Here that means calling this after moveBall() AND after every
+// player/AI collision with the ball.
 function resolveBallWalls() {
-  if (ball.y - ball.radius < 0) {
-    ball.y = ball.radius;
-    ball.vy = Math.abs(ball.vy) * 0.7;
-  }
-  if (ball.y + ball.radius > FIELD_H) {
-    ball.y = FIELD_H - ball.radius;
-    ball.vy = -Math.abs(ball.vy) * 0.7;
+  // Ground bounce
+  if (ball.h < 0) {
+    ball.h = 0;
+    if (ball.vh < 0) ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
+    if (Math.abs(ball.vh) < 40) ball.vh = 0; // let it actually settle instead of micro-bouncing forever
   }
 
-  const inGoalGapY = ball.y > GOAL_TOP && ball.y < GOAL_BOTTOM;
+  // Soft ceiling, so a big hit can't send it flying off-canvas forever
+  if (ball.h > CEILING_H) {
+    ball.h = CEILING_H;
+    if (ball.vh > 0) ball.vh = -Math.abs(ball.vh) * 0.5;
+  }
 
-  if (!inGoalGapY) {
-    if (ball.x - ball.radius < 0) {
-      ball.x = ball.radius;
-      ball.vx = Math.abs(ball.vx) * 0.7;
+  // Side walls double as the goal frame: below GOAL_HEIGHT, the ball is
+  // allowed through (that's the goal mouth); above it, it's a solid
+  // wall and bounces back — which naturally acts like hitting the post.
+  const inGoalOpening = ball.h < GOAL_HEIGHT;
+  if (!inGoalOpening) {
+    if (ball.x - ball.radius < GOAL_X_LEFT) {
+      ball.x = GOAL_X_LEFT + ball.radius;
+      ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
     }
-    if (ball.x + ball.radius > FIELD_W) {
-      ball.x = FIELD_W - ball.radius;
-      ball.vx = -Math.abs(ball.vx) * 0.7;
+    if (ball.x + ball.radius > GOAL_X_RIGHT) {
+      ball.x = GOAL_X_RIGHT - ball.radius;
+      ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
     }
   }
 }
 
-function handleEntityBallCollision(entity) {
-  const dx = ball.x - entity.x;
-  const dy = ball.y - entity.y;
-  const dist = Math.hypot(dx, dy);
-  const minDist = entity.radius + ball.radius;
+/* ---------------------------------------------------------------------
+   COLLISIONS
+   Both use plain circle-vs-circle math, just like v2/v3, except the
+   second coordinate is now "height" instead of "world depth".
+   --------------------------------------------------------------------- */
+function circleBallCollision(cx, cHeight, cRadius, sourceVx, sourceVh, kickPower) {
+  const dx = ball.x - cx;
+  const dh = ball.h - cHeight;
+  const dist = Math.hypot(dx, dh);
+  const minDist = cRadius + ball.radius;
 
   if (dist < minDist && dist > 0) {
     const overlap = minDist - dist;
     const nx = dx / dist;
-    const ny = dy / dist;
+    const nh = dh / dist;
     ball.x += nx * overlap;
-    ball.y += ny * overlap;
+    ball.h += nh * overlap;
 
-    const kickPower = 1.4;
-    ball.vx = nx * Math.hypot(entity.vx, entity.vy) * kickPower + entity.vx * 0.3;
-    ball.vy = ny * Math.hypot(entity.vx, entity.vy) * kickPower + entity.vy * 0.3;
+    const sourceSpeed = Math.hypot(sourceVx, sourceVh);
+    ball.vx = nx * sourceSpeed * kickPower + sourceVx * 0.3;
+    ball.vh = nh * sourceSpeed * kickPower + sourceVh * 0.3;
+    return true;
+  }
+  return false;
+}
+
+function handleEntityBallCollision(entity) {
+  const headCY = entity.h + HEAD_OFFSET;
+  const bootCY = entity.h + BOOT_OFFSET;
+
+  // Check the head first (bigger target); only test the boot if the
+  // head didn't already connect, so one contact doesn't double-kick.
+  const headHit = circleBallCollision(entity.x, headCY, HEAD_COLLISION_RADIUS, entity.vx, entity.vh, 1.25);
+  if (!headHit) {
+    circleBallCollision(entity.x, bootCY, BOOT_COLLISION_RADIUS, entity.vx, entity.vh, 1.5);
   }
 }
 
-function handleEntityCollision(a, b) {
+function handleBodyCollision(a, b) {
   const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const dist = Math.hypot(dx, dy);
-  const minDist = a.radius + b.radius;
+  const distX = Math.abs(dx);
+  const minDist = a.radius * 2 + b.radius * 2;
+  const heightDiff = Math.abs(a.h - b.h);
 
-  if (dist < minDist && dist > 0) {
-    const overlap = (minDist - dist) / 2;
-    const nx = dx / dist;
-    const ny = dy / dist;
-    a.x -= nx * overlap;
-    a.y -= ny * overlap;
-    b.x += nx * overlap;
-    b.y += ny * overlap;
+  // Only collide if they're roughly at the same height — lets a
+  // jumping player pass clean over a grounded one instead of shoving
+  // through them mid-air.
+  if (distX < minDist && distX > 0 && heightDiff < HEAD_COLLISION_RADIUS * 1.5) {
+    const overlap = (minDist - distX) / 2;
+    const dir = Math.sign(dx);
+    a.x -= dir * overlap;
+    b.x += dir * overlap;
 
-    // A real shove: whoever was moving faster into the other imparts a
-    // knockback impulse. Without this, "pushing" someone did nothing —
-    // they'd just get repositioned by the overlap fix, then immediately
-    // walk straight back since nothing ever displaced their velocity.
-    const KNOCK_STRENGTH = 0.55;
-    const aSpeed = Math.hypot(a.vx, a.vy);
-    const bSpeed = Math.hypot(b.vx, b.vy);
-    b.knockX += nx * aSpeed * KNOCK_STRENGTH;
-    b.knockY += ny * aSpeed * KNOCK_STRENGTH;
-    a.knockX -= nx * bSpeed * KNOCK_STRENGTH;
-    a.knockY -= ny * bSpeed * KNOCK_STRENGTH;
+    const KNOCK_STRENGTH = 0.5;
+    const aSpeed = Math.abs(a.vx);
+    const bSpeed = Math.abs(b.vx);
+    b.knockX += dir * aSpeed * KNOCK_STRENGTH;
+    a.knockX -= dir * bSpeed * KNOCK_STRENGTH;
   }
 }
 
 function handleGoals() {
-  if (ball.x + ball.radius < 0) {
+  if (ball.x + ball.radius < GOAL_X_LEFT) {
     scoreRight++;
     document.getElementById('scoreRight').textContent = scoreRight;
     resetAfterGoal();
   }
-  if (ball.x - ball.radius > FIELD_W) {
+  if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
     document.getElementById('scoreLeft').textContent = scoreLeft;
     resetAfterGoal();
@@ -465,188 +463,158 @@ function handleGoals() {
 }
 
 function resetAfterGoal() {
-  // BUG FIX: the old reset put the ball and both players dead-center on
-  // the exact same horizontal line as both goal mouths. That meant the
-  // very next AI-ball collision would send the ball dead straight
-  // through a goal again — it looked like the game "never restarted"
-  // because it kept re-scoring instantly. Staggering everyone off that
-  // line, plus a short freeze below, fixes it.
-  ball.x = FIELD_W / 2;
-  ball.y = FIELD_H / 2;
+  ball.x = CANVAS_W / 2;
+  ball.h = 220;
   ball.vx = 0;
-  ball.vy = 0;
-  player.x = FIELD_W / 2 - 150;
-  player.y = FIELD_H / 2 - 60;
-  opponent.x = FIELD_W / 2 + 150;
-  opponent.y = FIELD_H / 2 + 60;
+  ball.vh = 0;
+
+  player.x = GOAL_X_LEFT + 180;
+  player.h = 0;
+  player.vx = 0;
+  player.vh = 0;
+  player.knockX = 0;
+  player.grounded = true;
+
+  opponent.x = GOAL_X_RIGHT - 180;
+  opponent.h = 0;
   opponent.vx = 0;
-  opponent.vy = 0;
+  opponent.vh = 0;
+  opponent.knockX = 0;
+  opponent.grounded = true;
 
   kickoffTimer = KICKOFF_FREEZE_SECONDS;
 }
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
 /* ---------------------------------------------------------------------
-   5. RENDER — this is the part that's genuinely new in v3. Everything
-   below draws through project(), never touches raw world coordinates
-   directly on the canvas.
+   5. RENDER
    --------------------------------------------------------------------- */
 function render() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+  drawSky();
   drawPitch();
   drawGoal(true);
   drawGoal(false);
   drawEntitiesSorted();
 
   if (kickoffTimer > 0) {
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.fillStyle = '#eafaf0';
     ctx.font = 'bold 36px Segoe UI, Arial, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Kickoff!', canvas.width / 2, canvas.height / 2);
+    ctx.fillText('Kickoff!', CANVAS_W / 2, CANVAS_H / 2);
     ctx.textAlign = 'start';
   }
 }
 
-// ---- Pitch (ground plane) ----
+function drawSky() {
+  const gradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  gradient.addColorStop(0, '#173049');
+  gradient.addColorStop(1, '#2d5a63');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, CANVAS_W, GROUND_Y);
+}
+
 function drawPitch() {
-  const corners = [
-    project(0, 0), project(FIELD_W, 0),
-    project(FIELD_W, FIELD_H), project(0, FIELD_H)
-  ];
-
+  // Grass
   ctx.fillStyle = '#2e7d4f';
+  ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
+
+  // Mowed-stripe texture
+  const stripeW = 45;
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  for (let x = 0; x < CANVAS_W; x += stripeW * 2) {
+    ctx.fillRect(x, GROUND_Y, stripeW, CANVAS_H - GROUND_Y);
+  }
+
+  // Touchline
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(corners[0].x, corners[0].y);
-  for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
-  ctx.closePath();
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.moveTo(0, GROUND_Y);
+  ctx.lineTo(CANVAS_W, GROUND_Y);
+  ctx.stroke();
+
+  // Center mark — flattened since we're viewing the ground edge-on
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   ctx.lineWidth = 2;
-  ctx.stroke();
-
-  // Center line: a straight line in world space, still straight (but
-  // now diagonal) after projection since project() is a linear map.
-  const midTop = project(FIELD_W / 2, 0);
-  const midBottom = project(FIELD_W / 2, FIELD_H);
   ctx.beginPath();
-  ctx.moveTo(midTop.x, midTop.y);
-  ctx.lineTo(midBottom.x, midBottom.y);
+  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 46, 8, 0, Math.PI, Math.PI * 2);
   ctx.stroke();
-
-  // Center circle: a circle in world space becomes an ellipse-ish shape
-  // after our shear+squash, so we sample points around it rather than
-  // using ctx.arc (which only draws true circles).
-  drawWorldCircleOutline(FIELD_W / 2, FIELD_H / 2, 50);
+  ctx.beginPath();
+  ctx.arc(CANVAS_W / 2, GROUND_Y, 3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fill();
 }
 
-function drawWorldCircleOutline(wx, wy, radius, steps = 40) {
-  ctx.beginPath();
-  for (let i = 0; i <= steps; i++) {
-    const a = (i / steps) * Math.PI * 2;
-    const p = project(wx + Math.cos(a) * radius, wy + Math.sin(a) * radius, 0);
-    if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-  }
-  ctx.stroke();
-}
-
-// ---- Goals: real upright 3D-ish boxes made of projected quads ----
-const POST_HEIGHT = 90;     // visual height of the goal frame, in world units
-const GOAL_DEPTH = 45;      // how far the net extends behind the goal line
-
+// A proper goal frame: back post, front post, crossbar, and a hatched
+// net filling the box between them — plain 2D shapes now, no
+// projection math needed.
 function drawGoal(isLeft) {
-  const frontX = isLeft ? 0 : FIELD_W;
-  const backX = isLeft ? -GOAL_DEPTH : FIELD_W + GOAL_DEPTH;
+  const frontX = isLeft ? GOAL_X_LEFT : GOAL_X_RIGHT;
+  const backX = isLeft ? GOAL_X_LEFT - GOAL_NET_DEPTH : GOAL_X_RIGHT + GOAL_NET_DEPTH;
+  const leftX = Math.min(frontX, backX);
+  const rightX = Math.max(frontX, backX);
+  const topY = GROUND_Y - GOAL_HEIGHT;
 
-  // The 8 corners of the goal "box": front/back x top/bottom(depth) x ground/height
-  const fTopN = project(frontX, GOAL_TOP, POST_HEIGHT);
-  const fTopF = project(frontX, GOAL_BOTTOM, POST_HEIGHT);
-  const fBotN = project(frontX, GOAL_TOP, 0);
-  const fBotF = project(frontX, GOAL_BOTTOM, 0);
-
-  const bTopN = project(backX, GOAL_TOP, POST_HEIGHT);
-  const bTopF = project(backX, GOAL_BOTTOM, POST_HEIGHT);
-  const bBotN = project(backX, GOAL_TOP, 0);
-  const bBotF = project(backX, GOAL_BOTTOM, 0);
-
-  // Back panel first, then sides, then the front mouth — simple painter's
-  // order so nearer panels overlap farther ones correctly.
-  drawNetPanel(bTopN, bTopF, bBotN, bBotF, 6);
-  drawNetPanel(fTopN, bTopN, fBotN, bBotN, 3);
-  drawNetPanel(fTopF, bTopF, fBotF, bBotF, 3);
-  drawNetPanel(fTopN, fTopF, fBotN, fBotF, 6);
-
-  // Posts: because each post's base/top share the same world x & y and
-  // differ only in height, they project to the same screenX — so these
-  // draw as genuinely vertical lines, exactly like real goalposts.
-  ctx.strokeStyle = '#eafaf0';
-  ctx.lineWidth = 4;
-  [[fBotN, fTopN], [fBotF, fTopF]].forEach(([base, top]) => {
-    ctx.beginPath();
-    ctx.moveTo(base.x, base.y);
-    ctx.lineTo(top.x, top.y);
-    ctx.stroke();
-  });
-
-  // Crossbar
-  ctx.beginPath();
-  ctx.moveTo(fTopN.x, fTopN.y);
-  ctx.lineTo(fTopF.x, fTopF.y);
-  ctx.stroke();
-}
-
-// Draws a net panel (hatched grid + frame) across 4 already-projected
-// screen points using bilinear interpolation, so it works for any
-// quadrilateral shape the projection produces (front, side, or back).
-function drawNetPanel(topA, topB, botA, botB, steps) {
-  function at(u, v) {
-    const top = { x: topA.x + (topB.x - topA.x) * u, y: topA.y + (topB.y - topA.y) * u };
-    const bot = { x: botA.x + (botB.x - botA.x) * u, y: botA.y + (botB.y - botA.y) * u };
-    return { x: top.x + (bot.x - top.x) * v, y: top.y + (bot.y - top.y) * v };
-  }
-
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  // Net hatch
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
   ctx.lineWidth = 1;
-  for (let i = 0; i <= steps; i++) {
-    const u = i / steps;
-    const a = at(u, 0), b = at(u, 1);
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  const spacing = 11;
+  for (let x = leftX; x <= rightX; x += spacing) {
+    ctx.beginPath();
+    ctx.moveTo(x, topY);
+    ctx.lineTo(x, GROUND_Y);
+    ctx.stroke();
   }
-  for (let j = 0; j <= steps; j++) {
-    const v = j / steps;
-    const a = at(0, v), b = at(1, v);
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  for (let y = topY; y <= GROUND_Y; y += spacing) {
+    ctx.beginPath();
+    ctx.moveTo(leftX, y);
+    ctx.lineTo(rightX, y);
+    ctx.stroke();
   }
 
-  ctx.strokeStyle = 'rgba(234,250,240,0.8)';
-  ctx.lineWidth = 1.5;
+  // Frame: back post, front post, crossbar — thick, so it reads clearly
+  // as a real goal structure
+  ctx.strokeStyle = '#eafaf0';
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+
   ctx.beginPath();
-  ctx.moveTo(topA.x, topA.y);
-  ctx.lineTo(topB.x, topB.y);
-  ctx.lineTo(botB.x, botB.y);
-  ctx.lineTo(botA.x, botA.y);
-  ctx.closePath();
+  ctx.moveTo(frontX, GROUND_Y);
+  ctx.lineTo(frontX, topY);
   ctx.stroke();
-}
 
-// ---- Entities: ball, player, opponent, all drawn "standing" on the pitch ----
-const HEAD_HEIGHT = 48;   // how high the head floats above the ground, in world units
-const BOOT_HEIGHT = 14;   // how high the boot floats above the ground (the visible "gap")
-const BALL_VISUAL_HEIGHT = 8;
+  ctx.beginPath();
+  ctx.moveTo(backX, GROUND_Y);
+  ctx.lineTo(backX, topY);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(leftX, topY);
+  ctx.lineTo(rightX, topY);
+  ctx.stroke();
+
+  // Base plate, so the posts look planted rather than floating
+  ctx.fillStyle = '#eafaf0';
+  ctx.beginPath();
+  ctx.ellipse(frontX, GROUND_Y, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(backX, GROUND_Y, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineCap = 'butt';
+}
 
 function drawEntitiesSorted() {
-  // Painter's algorithm: draw whichever entity is "further away" (smaller
-  // world Y, since Y is our depth axis) first, so nearer entities
-  // correctly overlap farther ones instead of clipping through them.
+  // Painter's algorithm: draw whoever is higher in the air LAST so a
+  // jumping character correctly overlaps a grounded one they pass over.
   const items = [
     { e: player, kind: 'player' },
     { e: opponent, kind: 'player' },
     { e: ball, kind: 'ball' }
-  ].sort((a, b) => a.e.y - b.e.y);
+  ].sort((a, b) => a.e.h - b.e.h);
 
   items.forEach(item => {
     if (item.kind === 'ball') drawBall(item.e);
@@ -654,53 +622,60 @@ function drawEntitiesSorted() {
   });
 }
 
-// The ball just rolls on the ground — a shadow plus a circle drawn at a
-// small fixed height reads as a rolling ball, no extra decoration needed.
-function drawBall(entity) {
-  drawWorldCircleOutline(entity.x, entity.y, entity.radius * 0.8);
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.fill();
+// Shadows shrink and fade as their owner gets higher off the ground —
+// a simple, readable cue for height that costs almost nothing to draw.
+function drawGroundShadow(x, h, baseRadius) {
+  const t = clamp(h / 180, 0, 1);
+  const rx = baseRadius * (1 - 0.45 * t);
+  const ry = baseRadius * 0.32 * (1 - 0.45 * t);
+  const alpha = 0.3 * (1 - 0.5 * t);
 
-  const p = project(entity.x, entity.y, BALL_VISUAL_HEIGHT);
   ctx.beginPath();
-  ctx.arc(p.x, p.y, entity.radius, 0, Math.PI * 2);
+  ctx.ellipse(x, GROUND_Y, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+  ctx.fill();
+}
+
+function drawBall(entity) {
+  drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
+
+  const screenY = groundToScreenY(entity.h);
+  ctx.beginPath();
+  ctx.arc(entity.x, screenY, entity.radius, 0, Math.PI * 2);
   ctx.fillStyle = entity.color;
   ctx.fill();
   ctx.lineWidth = 2;
   ctx.strokeStyle = entity.dark;
   ctx.stroke();
+
+  // A couple of simple seam lines for a soccer-ball read
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.arc(entity.x, screenY, entity.radius * 0.55, 0.3, Math.PI - 0.3);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(entity.x, screenY, entity.radius * 0.55, Math.PI + 0.3, Math.PI * 2 - 0.3);
+  ctx.stroke();
 }
 
 /* =======================================================================
-   "HEAD SOCCER" STYLE CHARACTER — giant head directly above a floating
-   boot, no body in between. Everything below is drawn with plain canvas
-   primitives (arcs, ellipses, paths, rounded rects) — no image assets.
-
-   IMPORTANT — why these look "vertically upright" on a tilted pitch:
-   project(entity.x, entity.y, height) collapses the whole character down
-   to a single 2D screen point (screenX, screenY). Every shape below is
-   then drawn as ordinary, un-skewed 2D canvas art *around that one
-   point* — eyebrows, hair, boot laces, all of it. None of those shapes
-   are individually run back through the world projection, so none of
-   them inherit the pitch's shear or squash. That's what keeps the
-   characters looking like flat, upright cutouts standing on a tilted
-   floor, instead of leaning with the camera angle.
+   "HEAD SOCCER" STYLE CHARACTER — a big head stacked directly on a
+   smaller boot, no body in between. Same shape code as before; the only
+   thing that changed is how we get the anchor screen points, which is
+   now trivial (no shear/tilt to account for since the camera IS flat).
    ======================================================================= */
 function drawCharacter(entity) {
-  // Ground shadow first, so everything else draws on top of it
-  drawWorldCircleOutline(entity.x, entity.y, entity.radius * 1.1);
-  ctx.fillStyle = 'rgba(0,0,0,0.28)';
-  ctx.fill();
+  drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
 
-  const bootAnchor = project(entity.x, entity.y, BOOT_HEIGHT);
-  const headAnchor = project(entity.x, entity.y, HEAD_HEIGHT);
+  const baseY = groundToScreenY(entity.h);
+  const bootY = baseY - BOOT_OFFSET;
+  const headY = baseY - HEAD_OFFSET;
 
-  drawBoot(bootAnchor.x, bootAnchor.y, entity);
-  drawHead(headAnchor.x, headAnchor.y, entity);
+  drawBoot(entity.x, bootY, entity);
+  drawHead(entity.x, headY, entity);
 }
 
-// Small helper: a rounded rectangle path, since not every browser
-// supports ctx.roundRect() yet.
 function roundRectPath(x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
@@ -722,12 +697,10 @@ function drawBoot(cx, cy, entity) {
   ctx.save();
   ctx.translate(cx, cy);
 
-  // Sole
   ctx.fillStyle = '#141414';
   roundRectPath(-w * 0.5, h * 0.22, w, h * 0.24, h * 0.1);
   ctx.fill();
 
-  // Main boot body
   ctx.beginPath();
   ctx.ellipse(0, 0, w * 0.5, h * 0.42, 0, 0, Math.PI * 2);
   ctx.fillStyle = entity.bootColor;
@@ -736,14 +709,12 @@ function drawBoot(cx, cy, entity) {
   ctx.strokeStyle = 'rgba(0,0,0,0.4)';
   ctx.stroke();
 
-  // Ankle cuff
   roundRectPath(-w * 0.16, -h * 0.85, w * 0.32, h * 0.55, w * 0.08);
   ctx.fillStyle = entity.bootColor;
   ctx.fill();
   ctx.strokeStyle = 'rgba(0,0,0,0.4)';
   ctx.stroke();
 
-  // Team-colored accent stripe
   ctx.strokeStyle = entity.bootAccent;
   ctx.lineWidth = Math.max(2, h * 0.14);
   ctx.beginPath();
@@ -751,7 +722,6 @@ function drawBoot(cx, cy, entity) {
   ctx.lineTo(w * 0.34, -h * 0.02);
   ctx.stroke();
 
-  // Laces
   ctx.strokeStyle = '#f4f4f4';
   ctx.lineWidth = 1.5;
   for (let i = -1; i <= 1; i++) {
@@ -770,8 +740,6 @@ function drawHead(cx, cy, entity) {
   ctx.save();
   ctx.translate(cx, cy);
 
-  // Jersey collar, peeking out beneath the chin (drawn first so the
-  // head overlaps the top of it, like a neck emerging from a shirt)
   roundRectPath(-R * 0.55, R * 0.55, R * 1.1, R * 0.55, R * 0.15);
   ctx.fillStyle = entity.jerseyColor;
   ctx.fill();
@@ -787,7 +755,6 @@ function drawHead(cx, cy, entity) {
   ctx.lineTo(R * 0.2, R * 0.55);
   ctx.stroke();
 
-  // Ears
   ctx.fillStyle = entity.skin;
   [-1, 1].forEach(side => {
     ctx.beginPath();
@@ -798,7 +765,6 @@ function drawHead(cx, cy, entity) {
     ctx.stroke();
   });
 
-  // Head
   ctx.beginPath();
   ctx.arc(0, 0, R, 0, Math.PI * 2);
   ctx.fillStyle = entity.skin;
@@ -809,7 +775,6 @@ function drawHead(cx, cy, entity) {
 
   drawHair(entity, R);
 
-  // Eyebrows, angled inward for an intense "game face"
   ctx.strokeStyle = entity.browColor;
   ctx.lineWidth = R * 0.14;
   ctx.lineCap = 'round';
@@ -820,7 +785,6 @@ function drawHead(cx, cy, entity) {
     ctx.stroke();
   });
 
-  // Eyes
   [-1, 1].forEach(side => {
     ctx.beginPath();
     ctx.ellipse(side * R * 0.35, R * 0.03, R * 0.16, R * 0.12, 0, 0, Math.PI * 2);
@@ -841,7 +805,6 @@ function drawHead(cx, cy, entity) {
     ctx.fill();
   });
 
-  // Nose
   ctx.strokeStyle = 'rgba(0,0,0,0.35)';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
@@ -850,7 +813,6 @@ function drawHead(cx, cy, entity) {
   ctx.lineTo(R * 0.05, R * 0.3);
   ctx.stroke();
 
-  // Mouth: open, shouting — matches the "game face" energy of the style
   ctx.beginPath();
   ctx.ellipse(0, R * 0.5, R * 0.26, R * 0.13, 0, 0, Math.PI * 2);
   ctx.fillStyle = '#5c2020';
@@ -872,7 +834,6 @@ function drawHair(entity, R) {
   ctx.strokeStyle = 'rgba(0,0,0,0.3)';
 
   if (entity.hairStyle === 'spiky') {
-    // Messy spiked-up tufts across the top of the head
     ctx.beginPath();
     ctx.moveTo(-R * 0.9, -R * 0.3);
     const spikes = 6;
@@ -888,7 +849,6 @@ function drawHair(entity, R) {
     ctx.fill();
     ctx.stroke();
   } else {
-    // Side-swept hair, sweeping from a high point down over one side
     ctx.beginPath();
     ctx.moveTo(-R * 0.85, 0);
     ctx.quadraticCurveTo(-R * 0.9, -R * 0.85, -R * 0.1, -R * 0.85);
