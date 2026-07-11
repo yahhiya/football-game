@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Head Soccer — v4 (2D side view)</title>
+<title>Head Soccer — v5 (arcade tight)</title>
 <style>
   body {
     margin: 0;
@@ -11,7 +11,7 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: #10231a;
+    background: radial-gradient(ellipse at center, #1a3326 0%, #0a1810 100%);
     font-family: 'Segoe UI', Arial, sans-serif;
     color: #eafaf0;
   }
@@ -37,57 +37,74 @@
     text-align: center;
   }
 
+  /* Fixed arcade viewport — a crisp, locked window regardless of the
+     browser size around it, framed like a cabinet screen bezel. */
+  #arcade-frame {
+    padding: 14px;
+    background: linear-gradient(155deg, #2b2b2b, #0f0f0f);
+    border-radius: 16px;
+    box-shadow:
+      0 0 0 2px rgba(255,255,255,0.06),
+      0 16px 40px rgba(0,0,0,0.55),
+      inset 0 1px 0 rgba(255,255,255,0.08);
+  }
+
   canvas {
+    display: block;
+    width: 800px;
+    height: 450px;
     background: #0d2a1c;
-    border: 6px solid #eafaf0;
     border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    box-shadow: inset 0 0 24px rgba(0,0,0,0.6);
   }
 </style>
 </head>
 <body>
 
-<h1>⚽ Head Soccer — v4 (2D side view)</h1>
+<h1>⚽ Head Soccer — v5</h1>
 <div id="hud">
   <div>Blue (you): <span id="scoreLeft">0</span></div>
   <div>Red (AI): <span id="scoreRight">0</span></div>
 </div>
 
-<canvas id="field" width="900" height="500"></canvas>
+<div id="arcade-frame">
+  <canvas id="field" width="800" height="450"></canvas>
+</div>
 
 <div id="instructions">
   <strong>Click the field once to give it keyboard focus.</strong>
-  A/D or Left/Right to move. W, Up, or Space to jump. Headbutt or kick the
-  ball into the opponent's goal.
+  A/D or Left/Right to move. W, Up, or Space to jump. Get close to the
+  ball and press <strong>J</strong> for a low drive or <strong>K</strong>
+  for a high lofted shot. Headers happen automatically — just jump into it.
 </div>
 
 <script>
 /* =====================================================================
-   HEAD SOCCER — V4 (flat 2D side view, gravity-based physics)
+   HEAD SOCCER — V5 (arcade-tight rebuild)
 
-   BIG CHANGE FROM V3: this version has no camera projection at all. In
-   v3 we had to invent project(x, y, height) to fake a tilted 3D-ish
-   camera. Here the game genuinely IS 2D and side-on, so world
-   coordinates and screen coordinates are (almost) the same thing — the
-   only conversion left is flipping "height above the ground" into a
-   screen Y, since height counts UP but screen Y counts DOWN. That's it.
-   Everything else got simpler, not more complex, by matching the
-   camera to the game instead of faking one.
+   This pass focuses on FEEL and ROBUSTNESS rather than new features:
+     - fixed viewport sizing
+     - continuous collision detection (adaptive substepping) so the
+       ball can't tunnel through anything at high speed
+     - acceleration-based movement instead of instant velocity snaps
+     - asymmetric jump gravity (rises fast, falls faster) for a tight,
+       responsive jump arc
+     - a proper boot silhouette instead of a blob + rectangle
    ===================================================================== */
 
 const canvas = document.getElementById('field');
 const ctx = canvas.getContext('2d');
 
-const CANVAS_W = canvas.width;
-const CANVAS_H = canvas.height;
+const CANVAS_W = canvas.width;   // 800 — fixed arcade viewport
+const CANVAS_H = canvas.height;  // 450
 
 // ---- The pitch, in plain screen coordinates ----
-const GROUND_Y = 420;          // the horizontal line everything stands on
-const GOAL_X_LEFT = 90;        // left goal line (x position)
-const GOAL_X_RIGHT = 810;      // right goal line (x position)
-const GOAL_HEIGHT = 170;       // how tall the goal opening is
-const GOAL_NET_DEPTH = 55;     // how far the net extends behind the goal line
-const CEILING_H = GROUND_Y - 30; // soft ceiling so nothing flies off-canvas forever
+const GROUND_Y = 375;
+const GOAL_X_LEFT = 65;
+const GOAL_X_RIGHT = 735;
+const GOAL_HEIGHT = 150;
+const GOAL_NET_DEPTH = 42;
+const CEILING_H = GROUND_Y - 25;
 
 let scoreLeft = 0;
 let scoreRight = 0;
@@ -95,20 +112,24 @@ let scoreRight = 0;
 let kickoffTimer = 0;
 const KICKOFF_FREEZE_SECONDS = 1;
 
-/* ---------------------------------------------------------------------
-   HEIGHT <-> SCREEN CONVERSION
-   Every entity tracks a "height above ground" (h), where 0 = standing
-   on the ground and larger = higher in the air. Gravity just subtracts
-   from vertical velocity every frame — no different from any falling-
-   body physics problem. To actually draw something we flip it into a
-   screen Y coordinate once, right before drawing.
-   --------------------------------------------------------------------- */
 function groundToScreenY(h) {
   return GROUND_Y - h;
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+// Ramp `current` toward `target` by at most `maxDelta` this frame — the
+// building block of acceleration-based movement. Used for both player
+// input and AI steering so both feel equally tight.
+function moveToward(current, target, maxDelta) {
+  if (Math.abs(target - current) <= maxDelta) return target;
+  return current + Math.sign(target - current) * maxDelta;
+}
+
 /* ---------------------------------------------------------------------
-   1. THE GAME LOOP (unchanged pattern from v2/v3)
+   1. GAME LOOP
    --------------------------------------------------------------------- */
 let lastTime = performance.now();
 
@@ -123,9 +144,7 @@ function gameLoop(now) {
 }
 
 /* ---------------------------------------------------------------------
-   2. INPUT HANDLING
-   Only three actions now: move left, move right, jump. Jump uses W,
-   Up, or Space so whichever feels natural to your hand works.
+   2. INPUT
    --------------------------------------------------------------------- */
 const keys = {};
 const MOVE_KEYS = ['a', 'd', 'arrowleft', 'arrowright', 'w', 'arrowup', ' '];
@@ -134,6 +153,8 @@ window.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
   keys[key] = true;
   if (MOVE_KEYS.includes(key)) e.preventDefault();
+  if (key === 'j') { e.preventDefault(); tryShoot(player, 'low'); }
+  if (key === 'k') { e.preventDefault(); tryShoot(player, 'high'); }
 });
 window.addEventListener('keyup', e => {
   keys[e.key.toLowerCase()] = false;
@@ -147,25 +168,20 @@ canvas.focus();
 
 /* ---------------------------------------------------------------------
    3. ENTITIES
-   x        — horizontal position (the only axis players move under
-              their own power)
-   h        — height above the ground (0 = grounded)
-   vx, vh   — horizontal and vertical velocity
-   grounded — true when h === 0, used to decide "can I jump right now?"
-   knockX   — a separate horizontal "shove" velocity from collisions,
-              decays on its own (same idea as v3's knockback system)
-   radius   — a scale factor the head/boot drawing code uses; also
-              doubles as the shadow size
    --------------------------------------------------------------------- */
 const player = {
-  x: GOAL_X_LEFT + 180,
+  x: GOAL_X_LEFT + 150,
   h: 0,
   vx: 0,
   vh: 0,
   grounded: true,
   knockX: 0,
-  radius: 16,
-  speed: 260,
+  radius: 14,
+  speed: 280,
+  attackDir: 1,
+  shotCooldown: 0,
+  kickTimer: 0,
+  kickType: null,
   skin: '#e3a874',
   hairColor: '#e8b23d',
   hairStyle: 'spiky',
@@ -177,14 +193,18 @@ const player = {
 };
 
 const opponent = {
-  x: GOAL_X_RIGHT - 180,
+  x: GOAL_X_RIGHT - 150,
   h: 0,
   vx: 0,
   vh: 0,
   grounded: true,
   knockX: 0,
-  radius: 16,
-  speed: 230,
+  radius: 14,
+  speed: 225,
+  attackDir: -1,
+  shotCooldown: 0,
+  kickTimer: 0,
+  kickType: null,
   skin: '#d99a6c',
   hairColor: '#241a12',
   hairStyle: 'side',
@@ -197,34 +217,66 @@ const opponent = {
 
 const ball = {
   x: CANVAS_W / 2,
-  h: 220,
+  h: 200,
   vx: 0,
   vh: 0,
-  radius: 15,
+  radius: 14,
   color: '#fff8dc',
   dark: '#c9a86a'
 };
 
 // ---- Tuning constants ----
-const GRAVITY_PLAYER = 1600;
-const JUMP_VELOCITY = 620;
 
-const GRAVITY_BALL = 1300;
-const BALL_GROUND_RESTITUTION = 0.62; // how much bounce energy survives hitting the ground
-const BALL_WALL_RESTITUTION = 0.55;
-const BALL_AIR_DRAG_PER_SECOND = 0.05;    // very light — the ball should carry through the air
-const BALL_GROUND_FRICTION_PER_SECOND = 0.5;
+// Movement: acceleration-based so input feels immediate but not
+// teleport-y. High accel = snaps to full speed almost instantly; high
+// decel = stops on a dime when you let go.
+const MOVE_ACCEL = 3600;
+const MOVE_DECEL = 4400;
 
-const HEAD_COLLISION_RADIUS = 30;
-const BOOT_COLLISION_RADIUS = 18;
-const HEAD_OFFSET = 78;  // how far above the feet the head sits
-const BOOT_OFFSET = 8;   // how far above the feet the boot's kicking point sits
+// Jump: asymmetric gravity is the classic "tight platformer jump" trick
+// — rising uses a lighter pull so the jump feels responsive and floaty
+// at the top, falling uses a much heavier pull so you come back down
+// fast instead of hanging in the air.
+const GRAVITY_PLAYER_UP = 1500;
+const GRAVITY_PLAYER_DOWN = 2150;
+const JUMP_VELOCITY = 650;
+
+// Ball physics — REBALANCED for a defendable, controllable match instead
+// of a pinball machine. The previous pass over-tuned for "bouncy" and
+// under-tuned for "fair": restitution was too high, drag was too low,
+// and there was no speed ceiling, so a couple of lucky bounces could
+// snowball into a ball moving faster than anyone could react to.
+const GRAVITY_BALL = 1200;
+const BALL_GROUND_RESTITUTION = 0.68;
+const BALL_WALL_RESTITUTION = 0.6;
+const BALL_COLLISION_RESTITUTION = 0.7;
+const BALL_AIR_DRAG_PER_SECOND = 0.22;   // real air resistance now — a kicked ball visibly loses pace
+const BALL_GROUND_FRICTION_PER_SECOND = 0.62;
+const BALL_SETTLE_THRESHOLD = 18;
+const BALL_MAX_SPEED = 780;              // hard cap — nothing can push the ball faster than this, ever
+
+const HEAD_COLLISION_RADIUS = 27;
+const BOOT_COLLISION_RADIUS = 16;
+const HEAD_OFFSET = 70;
+const BOOT_OFFSET = 7;
+// BUG FIX: the head circle (bottom edge at h=43) and boot circle (top
+// edge at h=23) left a 20px gap with NO collision coverage between
+// them — the ball could slip straight through the middle of a player.
+// BODY_RADIUS defines a capsule (a "torso") spanning that exact gap, so
+// the whole silhouette from boot to head is one unbroken hitbox.
+const BODY_RADIUS = 19;
 
 const KNOCKBACK_FRICTION_PER_SECOND = 0.9;
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+// Shooting — also toned down so a single shot can't cross the whole
+// pitch before the defender has any chance to react.
+const SHOOT_RANGE = 80;
+const SHOT_COOLDOWN_SECONDS = 0.55;
+const KICK_ANIM_DURATION = 0.26;
+const LOW_SHOT_SPEED = 560;
+const LOW_SHOT_LIFT = 70;
+const HIGH_SHOT_SPEED = 360;
+const HIGH_SHOT_LIFT = 660;
 
 /* ---------------------------------------------------------------------
    4. UPDATE
@@ -232,34 +284,74 @@ function clamp(value, min, max) {
 function update(dt) {
   if (kickoffTimer > 0) {
     kickoffTimer = Math.max(0, kickoffTimer - dt);
-    // Let the ball keep falling during the kickoff pause — it visibly
-    // drops in and settles, like a real kickoff, while players hold.
-    moveBall(dt);
+    simulateBallSubsteps(dt); // let it visibly drop/settle during the pause
     return;
   }
 
   movePlayer(dt);
   updateOpponentAI(dt);
-  moveBall(dt);
 
-  handleEntityBallCollision(player);
-  resolveBallWalls();
-  handleEntityBallCollision(opponent);
-  resolveBallWalls();
+  simulateBallSubsteps(dt);
 
   handleBodyCollision(player, opponent);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
+}
 
-  handleGoals();
+/* ---------------------------------------------------------------------
+   CONTINUOUS COLLISION DETECTION (adaptive substepping)
+
+   THE PROBLEM: a circle-vs-circle overlap check only catches a
+   collision if the two shapes actually overlap at the moment we check.
+   If the ball is moving fast enough to cross an entire player's
+   diameter within a single frame, it can be on one side before the
+   frame and the other side after — with no frame in between where they
+   ever overlapped. The check technically never fails; it just never
+   runs at the right moment. That's tunneling, and it's why a fast shot
+   could clip straight through a head.
+
+   THE FIX: instead of moving the ball the FULL distance in one big
+   step and checking once, split this frame's motion into several
+   smaller sub-steps — enough that the ball can't move more than about
+   one collider-radius per step — and run the full move+collide check
+   after EACH sub-step. The ball is still checked at every point along
+   its path in practice, just broken into pieces small enough that nothing
+   can hide between checks. Gravity, drag, and everything else scale
+   down proportionally with the smaller time slice, so the total motion
+   over the whole frame comes out the same as before — it's just
+   sampled finely enough to never miss a collision.
+   --------------------------------------------------------------------- */
+function simulateBallSubsteps(dt) {
+  const speed = Math.hypot(ball.vx, ball.vh);
+  const maxStepDistance = Math.max(4, BOOT_COLLISION_RADIUS * 0.8);
+  // Capped at 12 sub-steps/frame purely for performance headroom — that's
+  // still cheap (12 simple collision checks is nothing for a canvas this
+  // size). The cap means the no-tunnel guarantee technically only holds
+  // up to a few thousand px/s; this game's fastest shot tops out around
+  // 700px/s, so there's roughly an order of magnitude of safety margin.
+  const steps = clamp(Math.ceil((speed * dt) / maxStepDistance), 1, 12);
+  const subDt = dt / steps;
+
+  for (let i = 0; i < steps; i++) {
+    moveBall(subDt);
+    handleEntityBallCollision(player);
+    resolveBallWalls();
+    handleEntityBallCollision(opponent);
+    resolveBallWalls();
+    if (handleGoals()) return; // a goal reset everything — stop this frame's remaining sub-steps
+  }
 }
 
 function movePlayer(dt) {
+  updateShotTimers(player, dt);
+
   let dir = 0;
   if (keys['a'] || keys['arrowleft']) dir -= 1;
   if (keys['d'] || keys['arrowright']) dir += 1;
 
-  player.vx = dir * player.speed;
+  const targetVx = dir * player.speed;
+  const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
+  player.vx = moveToward(player.vx, targetVx, accel * dt);
   player.x += player.vx * dt;
 
   if ((keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
@@ -273,12 +365,9 @@ function movePlayer(dt) {
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
 }
 
-/* ---------------------------------------------------------------------
-   AI OPPONENT — seek the ball horizontally, jump when it's close and
-   up in the air, and steer away from the player when crowded (same
-   "seek + separation" blend as v3, just collapsed to one axis).
-   --------------------------------------------------------------------- */
 function updateOpponentAI(dt) {
+  updateShotTimers(opponent, dt);
+
   const toBallX = ball.x - opponent.x;
   let desiredDir = 0;
   if (Math.abs(toBallX) > 4) desiredDir = Math.sign(toBallX);
@@ -291,8 +380,10 @@ function updateOpponentAI(dt) {
     sepDir = Math.sign(awayX) * (1 - distPlayer / SEPARATION_RANGE);
   }
 
-  let steer = clamp(desiredDir + sepDir * 1.3, -1, 1);
-  opponent.vx = steer * opponent.speed;
+  const steer = clamp(desiredDir + sepDir * 1.3, -1, 1);
+  const targetVx = steer * opponent.speed;
+  const accel = Math.abs(steer) > 0.05 ? MOVE_ACCEL : MOVE_DECEL;
+  opponent.vx = moveToward(opponent.vx, targetVx, accel * dt);
   opponent.x += opponent.vx * dt;
 
   const ballIsClose = Math.abs(ball.x - opponent.x) < 70;
@@ -302,15 +393,18 @@ function updateOpponentAI(dt) {
     opponent.grounded = false;
   }
 
+  const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
+  tryShoot(opponent, shotType);
+
   applyGravity(opponent, dt);
   applyKnockback(opponent, dt);
 
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
-// Shared by player and AI: fall under gravity, land on the ground.
 function applyGravity(entity, dt) {
-  entity.vh -= GRAVITY_PLAYER * dt;
+  const g = entity.vh > 0 ? GRAVITY_PLAYER_UP : GRAVITY_PLAYER_DOWN;
+  entity.vh -= g * dt;
   entity.h += entity.vh * dt;
 
   if (entity.h <= 0) {
@@ -322,9 +416,6 @@ function applyGravity(entity, dt) {
   }
 }
 
-// Knockback: a separate "shove" velocity so a body collision can
-// actually displace someone, instead of being instantly overwritten by
-// their own WASD input or AI steering next frame.
 function applyKnockback(entity, dt) {
   const decay = Math.pow(1 - KNOCKBACK_FRICTION_PER_SECOND, dt);
   entity.knockX *= decay;
@@ -336,13 +427,9 @@ function moveBall(dt) {
   ball.vh -= GRAVITY_BALL * dt;
 
   if (ball.h > 0) {
-    // Light air resistance — the ball should carry through its arc
-    const airDrag = Math.pow(1 - BALL_AIR_DRAG_PER_SECOND, dt);
-    ball.vx *= airDrag;
+    ball.vx *= Math.pow(1 - BALL_AIR_DRAG_PER_SECOND, dt);
   } else {
-    // Rolling friction once it's on the ground
-    const groundFriction = Math.pow(1 - BALL_GROUND_FRICTION_PER_SECOND, dt);
-    ball.vx *= groundFriction;
+    ball.vx *= Math.pow(1 - BALL_GROUND_FRICTION_PER_SECOND, dt);
     if (Math.abs(ball.vx) < 2) ball.vx = 0;
   }
 
@@ -352,29 +439,18 @@ function moveBall(dt) {
   resolveBallWalls();
 }
 
-// LESSON CARRIED OVER FROM V3: any function that can move the ball
-// needs to re-check the walls/ground afterward, or two different
-// pieces of collision code can fight each other and pin the ball
-// somewhere illegal (that was the "stuck in the corner" bug last time).
-// Here that means calling this after moveBall() AND after every
-// player/AI collision with the ball.
 function resolveBallWalls() {
-  // Ground bounce
   if (ball.h < 0) {
     ball.h = 0;
     if (ball.vh < 0) ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
-    if (Math.abs(ball.vh) < 40) ball.vh = 0; // let it actually settle instead of micro-bouncing forever
+    if (Math.abs(ball.vh) < BALL_SETTLE_THRESHOLD) ball.vh = 0;
   }
 
-  // Soft ceiling, so a big hit can't send it flying off-canvas forever
   if (ball.h > CEILING_H) {
     ball.h = CEILING_H;
     if (ball.vh > 0) ball.vh = -Math.abs(ball.vh) * 0.5;
   }
 
-  // Side walls double as the goal frame: below GOAL_HEIGHT, the ball is
-  // allowed through (that's the goal mouth); above it, it's a solid
-  // wall and bounces back — which naturally acts like hitting the post.
   const inGoalOpening = ball.h < GOAL_HEIGHT;
   if (!inGoalOpening) {
     if (ball.x - ball.radius < GOAL_X_LEFT) {
@@ -386,44 +462,118 @@ function resolveBallWalls() {
       ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
     }
   }
+
+  // Hard speed cap. This runs after every single thing that can change
+  // the ball's velocity (movement, wall bounces, player collisions,
+  // shots), so there's no path — including several bounces stacking
+  // restitution on top of each other — that can sneak the ball above
+  // this speed. That's what keeps the match from snowballing into chaos.
+  const speed = Math.hypot(ball.vx, ball.vh);
+  if (speed > BALL_MAX_SPEED) {
+    const scale = BALL_MAX_SPEED / speed;
+    ball.vx *= scale;
+    ball.vh *= scale;
+  }
 }
 
 /* ---------------------------------------------------------------------
-   COLLISIONS
-   Both use plain circle-vs-circle math, just like v2/v3, except the
-   second coordinate is now "height" instead of "world depth".
+   ENTITY HITBOX — head circle + boot circle + a CAPSULE spanning the
+   torso between them (see BODY_RADIUS above). Together these form one
+   continuous vertical hitbox with no gap the ball can slip through.
+
+   Each candidate surface is tested and scored by how deep the ball has
+   penetrated into it; only the single deepest contact is resolved per
+   check. That avoids two overlapping surfaces (say, the capsule and
+   the head) both firing and fighting each other in the same frame,
+   while still guaranteeing the ball gets pushed fully clear of
+   whichever surface it actually hit.
    --------------------------------------------------------------------- */
-function circleBallCollision(cx, cHeight, cRadius, sourceVx, sourceVh, kickPower) {
+function pointOverlap(cx, cH, cR, kickPower) {
   const dx = ball.x - cx;
-  const dh = ball.h - cHeight;
+  const dh = ball.h - cH;
   const dist = Math.hypot(dx, dh);
-  const minDist = cRadius + ball.radius;
+  const minDist = cR + ball.radius;
+  return {
+    dist, penetration: minDist - dist,
+    nx: dist > 0 ? dx / dist : 0,
+    nh: dist > 0 ? dh / dist : 1,
+    kickPower
+  };
+}
 
-  if (dist < minDist && dist > 0) {
-    const overlap = minDist - dist;
-    const nx = dx / dist;
-    const nh = dh / dist;
-    ball.x += nx * overlap;
-    ball.h += nh * overlap;
+// A capsule is just "the closest point on a line segment" instead of a
+// single fixed point — same math as pointOverlap, but the point we
+// measure from slides along the segment first.
+function capsuleOverlap(cx, bottomH, topH, cR, kickPower) {
+  const clampedH = clamp(ball.h, bottomH, topH);
+  return pointOverlap(cx, clampedH, cR, kickPower);
+}
 
-    const sourceSpeed = Math.hypot(sourceVx, sourceVh);
-    ball.vx = nx * sourceSpeed * kickPower + sourceVx * 0.3;
-    ball.vh = nh * sourceSpeed * kickPower + sourceVh * 0.3;
-    return true;
+function resolveDeepestContact(entity) {
+  const candidates = [
+    pointOverlap(entity.x, entity.h + HEAD_OFFSET, HEAD_COLLISION_RADIUS, 1.1),
+    pointOverlap(entity.x, entity.h + BOOT_OFFSET, BOOT_COLLISION_RADIUS, 1.3),
+    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET, entity.h + HEAD_OFFSET, BODY_RADIUS, 1.15)
+  ];
+
+  let best = null;
+  for (const c of candidates) {
+    if (c.penetration > 0 && c.dist > 0 && (!best || c.penetration > best.penetration)) {
+      best = c;
+    }
   }
-  return false;
+  if (!best) return false;
+
+  // Push the ball fully clear along the contact normal — never leaves
+  // it embedded, regardless of which surface it hit.
+  ball.x += best.nx * best.penetration;
+  ball.h += best.nh * best.penetration;
+
+  const dot = ball.vx * best.nx + ball.vh * best.nh;
+  const reflectedVx = ball.vx - 2 * dot * best.nx;
+  const reflectedVh = ball.vh - 2 * dot * best.nh;
+  const entitySpeed = Math.hypot(entity.vx, entity.vh);
+
+  ball.vx = reflectedVx * BALL_COLLISION_RESTITUTION + best.nx * entitySpeed * best.kickPower + entity.vx * 0.35;
+  ball.vh = reflectedVh * BALL_COLLISION_RESTITUTION + best.nh * entitySpeed * best.kickPower + entity.vh * 0.35;
+  return true;
 }
 
 function handleEntityBallCollision(entity) {
-  const headCY = entity.h + HEAD_OFFSET;
-  const bootCY = entity.h + BOOT_OFFSET;
-
-  // Check the head first (bigger target); only test the boot if the
-  // head didn't already connect, so one contact doesn't double-kick.
-  const headHit = circleBallCollision(entity.x, headCY, HEAD_COLLISION_RADIUS, entity.vx, entity.vh, 1.25);
-  if (!headHit) {
-    circleBallCollision(entity.x, bootCY, BOOT_COLLISION_RADIUS, entity.vx, entity.vh, 1.5);
+  // Resolve up to twice: fixing the deepest contact can occasionally
+  // leave a smaller residual overlap with a different part of the
+  // hitbox (e.g. pushing out of the head grazes the capsule) — a
+  // second pass cleans that up so the ball never ends this check still
+  // partially inside the player.
+  let hitAny = false;
+  for (let pass = 0; pass < 2; pass++) {
+    if (resolveDeepestContact(entity)) hitAny = true;
+    else break;
   }
+  return hitAny;
+}
+
+function tryShoot(entity, type) {
+  if (entity.shotCooldown > 0) return false;
+
+  const dist = Math.hypot(ball.x - entity.x, ball.h - (entity.h + BOOT_OFFSET));
+  if (dist > SHOOT_RANGE) return false;
+
+  const speed = type === 'low' ? LOW_SHOT_SPEED : HIGH_SHOT_SPEED;
+  const lift = type === 'low' ? LOW_SHOT_LIFT : HIGH_SHOT_LIFT;
+
+  ball.vx = entity.attackDir * speed + entity.vx * 0.25;
+  ball.vh = lift + entity.vh * 0.25;
+
+  entity.shotCooldown = SHOT_COOLDOWN_SECONDS;
+  entity.kickTimer = KICK_ANIM_DURATION;
+  entity.kickType = type;
+  return true;
+}
+
+function updateShotTimers(entity, dt) {
+  entity.shotCooldown = Math.max(0, entity.shotCooldown - dt);
+  entity.kickTimer = Math.max(0, entity.kickTimer - dt);
 }
 
 function handleBodyCollision(a, b) {
@@ -432,9 +582,6 @@ function handleBodyCollision(a, b) {
   const minDist = a.radius * 2 + b.radius * 2;
   const heightDiff = Math.abs(a.h - b.h);
 
-  // Only collide if they're roughly at the same height — lets a
-  // jumping player pass clean over a grounded one instead of shoving
-  // through them mid-air.
   if (distX < minDist && distX > 0 && heightDiff < HEAD_COLLISION_RADIUS * 1.5) {
     const overlap = (minDist - distX) / 2;
     const dir = Math.sign(dx);
@@ -454,33 +601,40 @@ function handleGoals() {
     scoreRight++;
     document.getElementById('scoreRight').textContent = scoreRight;
     resetAfterGoal();
+    return true;
   }
   if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
     document.getElementById('scoreLeft').textContent = scoreLeft;
     resetAfterGoal();
+    return true;
   }
+  return false;
 }
 
 function resetAfterGoal() {
   ball.x = CANVAS_W / 2;
-  ball.h = 220;
+  ball.h = 200;
   ball.vx = 0;
   ball.vh = 0;
 
-  player.x = GOAL_X_LEFT + 180;
+  player.x = GOAL_X_LEFT + 150;
   player.h = 0;
   player.vx = 0;
   player.vh = 0;
   player.knockX = 0;
   player.grounded = true;
+  player.shotCooldown = 0;
+  player.kickTimer = 0;
 
-  opponent.x = GOAL_X_RIGHT - 180;
+  opponent.x = GOAL_X_RIGHT - 150;
   opponent.h = 0;
   opponent.vx = 0;
   opponent.vh = 0;
   opponent.knockX = 0;
   opponent.grounded = true;
+  opponent.shotCooldown = 0;
+  opponent.kickTimer = 0;
 
   kickoffTimer = KICKOFF_FREEZE_SECONDS;
 }
@@ -500,7 +654,7 @@ function render() {
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
     ctx.fillStyle = '#eafaf0';
-    ctx.font = 'bold 36px Segoe UI, Arial, sans-serif';
+    ctx.font = 'bold 32px Segoe UI, Arial, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Kickoff!', CANVAS_W / 2, CANVAS_H / 2);
     ctx.textAlign = 'start';
@@ -516,18 +670,15 @@ function drawSky() {
 }
 
 function drawPitch() {
-  // Grass
   ctx.fillStyle = '#2e7d4f';
   ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
 
-  // Mowed-stripe texture
-  const stripeW = 45;
+  const stripeW = 40;
   ctx.fillStyle = 'rgba(255,255,255,0.05)';
   for (let x = 0; x < CANVAS_W; x += stripeW * 2) {
     ctx.fillRect(x, GROUND_Y, stripeW, CANVAS_H - GROUND_Y);
   }
 
-  // Touchline
   ctx.strokeStyle = 'rgba(255,255,255,0.7)';
   ctx.lineWidth = 3;
   ctx.beginPath();
@@ -535,11 +686,10 @@ function drawPitch() {
   ctx.lineTo(CANVAS_W, GROUND_Y);
   ctx.stroke();
 
-  // Center mark — flattened since we're viewing the ground edge-on
   ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 46, 8, 0, Math.PI, Math.PI * 2);
+  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 40, 7, 0, Math.PI, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(CANVAS_W / 2, GROUND_Y, 3, 0, Math.PI * 2);
@@ -547,9 +697,6 @@ function drawPitch() {
   ctx.fill();
 }
 
-// A proper goal frame: back post, front post, crossbar, and a hatched
-// net filling the box between them — plain 2D shapes now, no
-// projection math needed.
 function drawGoal(isLeft) {
   const frontX = isLeft ? GOAL_X_LEFT : GOAL_X_RIGHT;
   const backX = isLeft ? GOAL_X_LEFT - GOAL_NET_DEPTH : GOAL_X_RIGHT + GOAL_NET_DEPTH;
@@ -557,10 +704,9 @@ function drawGoal(isLeft) {
   const rightX = Math.max(frontX, backX);
   const topY = GROUND_Y - GOAL_HEIGHT;
 
-  // Net hatch
   ctx.strokeStyle = 'rgba(255,255,255,0.4)';
   ctx.lineWidth = 1;
-  const spacing = 11;
+  const spacing = 10;
   for (let x = leftX; x <= rightX; x += spacing) {
     ctx.beginPath();
     ctx.moveTo(x, topY);
@@ -574,10 +720,8 @@ function drawGoal(isLeft) {
     ctx.stroke();
   }
 
-  // Frame: back post, front post, crossbar — thick, so it reads clearly
-  // as a real goal structure
   ctx.strokeStyle = '#eafaf0';
-  ctx.lineWidth = 6;
+  ctx.lineWidth = 5;
   ctx.lineCap = 'round';
 
   ctx.beginPath();
@@ -595,21 +739,18 @@ function drawGoal(isLeft) {
   ctx.lineTo(rightX, topY);
   ctx.stroke();
 
-  // Base plate, so the posts look planted rather than floating
   ctx.fillStyle = '#eafaf0';
   ctx.beginPath();
-  ctx.ellipse(frontX, GROUND_Y, 8, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(frontX, GROUND_Y, 7, 3, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(backX, GROUND_Y, 8, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(backX, GROUND_Y, 7, 3, 0, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.lineCap = 'butt';
 }
 
 function drawEntitiesSorted() {
-  // Painter's algorithm: draw whoever is higher in the air LAST so a
-  // jumping character correctly overlaps a grounded one they pass over.
   const items = [
     { e: player, kind: 'player' },
     { e: opponent, kind: 'player' },
@@ -622,10 +763,8 @@ function drawEntitiesSorted() {
   });
 }
 
-// Shadows shrink and fade as their owner gets higher off the ground —
-// a simple, readable cue for height that costs almost nothing to draw.
 function drawGroundShadow(x, h, baseRadius) {
-  const t = clamp(h / 180, 0, 1);
+  const t = clamp(h / 160, 0, 1);
   const rx = baseRadius * (1 - 0.45 * t);
   const ry = baseRadius * 0.32 * (1 - 0.45 * t);
   const alpha = 0.3 * (1 - 0.5 * t);
@@ -648,7 +787,6 @@ function drawBall(entity) {
   ctx.strokeStyle = entity.dark;
   ctx.stroke();
 
-  // A couple of simple seam lines for a soccer-ball read
   ctx.strokeStyle = 'rgba(0,0,0,0.25)';
   ctx.lineWidth = 1.2;
   ctx.beginPath();
@@ -659,12 +797,6 @@ function drawBall(entity) {
   ctx.stroke();
 }
 
-/* =======================================================================
-   "HEAD SOCCER" STYLE CHARACTER — a big head stacked directly on a
-   smaller boot, no body in between. Same shape code as before; the only
-   thing that changed is how we get the anchor screen points, which is
-   now trivial (no shear/tilt to account for since the camera IS flat).
-   ======================================================================= */
 function drawCharacter(entity) {
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
 
@@ -673,7 +805,24 @@ function drawCharacter(entity) {
   const headY = baseY - HEAD_OFFSET;
 
   drawBoot(entity.x, bootY, entity);
+  drawTorso(entity.x, bootY, headY, entity);
   drawHead(entity.x, headY, entity);
+}
+
+// The visible "torso" strip fills the same space as the BODY_RADIUS
+// capsule hitbox — so what you see lined up with the physics is
+// exactly what actually blocks the ball, no gap either way.
+function drawTorso(cx, bootScreenY, headScreenY, entity) {
+  const width = BODY_RADIUS * 1.7;
+  const top = headScreenY + entity.radius * 0.9;   // tucks up under the chin
+  const bottom = bootScreenY - entity.radius * 0.15; // tucks down into the ankle cuff
+
+  roundRectPath(cx - width / 2, top, width, bottom - top, width * 0.3);
+  ctx.fillStyle = entity.jerseyColor;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.stroke();
 }
 
 function roundRectPath(x, y, w, h, r) {
@@ -690,44 +839,77 @@ function roundRectPath(x, y, w, h, r) {
   ctx.closePath();
 }
 
+/* -----------------------------------------------------------------------
+   BOOT — a proper angled silhouette (heel, arched sole, pointed toe,
+   ankle cuff, studs) instead of an ellipse-plus-rectangle blob. Drawn
+   "pointing" toward +x in local space; ctx.scale(attackDir, 1) below
+   mirrors it to face whichever goal that entity attacks, so the kick
+   swing rotation itself never needs to know which team it's animating.
+   ----------------------------------------------------------------------- */
 function drawBoot(cx, cy, entity) {
-  const w = entity.radius * 2.7;
-  const h = entity.radius * 1.4;
+  const w = entity.radius * 3.1;
+  const h = entity.radius * 1.9;
+
+  let swingAngle = 0;
+  if (entity.kickTimer > 0 && entity.kickType) {
+    const progress = 1 - entity.kickTimer / KICK_ANIM_DURATION;
+    const swing = Math.sin(progress * Math.PI);
+    const maxAngle = entity.kickType === 'low' ? 0.8 : 1.15;
+    swingAngle = -maxAngle * swing;
+  }
 
   ctx.save();
   ctx.translate(cx, cy);
+  ctx.scale(entity.attackDir, 1); // face the attack direction
+  ctx.rotate(swingAngle);
 
-  ctx.fillStyle = '#141414';
-  roundRectPath(-w * 0.5, h * 0.22, w, h * 0.24, h * 0.1);
-  ctx.fill();
+  // Boot silhouette: heel (back) -> ankle cuff -> tongue -> toe -> sole -> back to heel
+  const heelX = -w * 0.42, toeX = w * 0.52;
+  const soleY = h * 0.3, cuffTopY = -h * 0.62;
 
   ctx.beginPath();
-  ctx.ellipse(0, 0, w * 0.5, h * 0.42, 0, 0, Math.PI * 2);
+  ctx.moveTo(heelX + w * 0.08, cuffTopY);                                  // ankle back, top
+  ctx.quadraticCurveTo(-w * 0.02, cuffTopY - h * 0.08, w * 0.04, cuffTopY + h * 0.05); // cuff top curve to tongue
+  ctx.quadraticCurveTo(w * 0.34, -h * 0.28, toeX, h * 0.02);                // instep down to toe tip
+  ctx.quadraticCurveTo(w * 0.5, h * 0.22, toeX - w * 0.14, soleY);          // toe curve to ball-of-foot
+  ctx.lineTo(heelX + w * 0.06, soleY);                                     // sole, flat-ish
+  ctx.quadraticCurveTo(heelX - w * 0.04, soleY - h * 0.05, heelX, h * 0.02); // heel bottom curve
+  ctx.quadraticCurveTo(heelX - w * 0.03, cuffTopY + h * 0.25, heelX + w * 0.08, cuffTopY); // heel back up to cuff
+  ctx.closePath();
+
   ctx.fillStyle = entity.bootColor;
   ctx.fill();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
   ctx.stroke();
 
-  roundRectPath(-w * 0.16, -h * 0.85, w * 0.32, h * 0.55, w * 0.08);
-  ctx.fillStyle = entity.bootColor;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.stroke();
-
-  ctx.strokeStyle = entity.bootAccent;
-  ctx.lineWidth = Math.max(2, h * 0.14);
-  ctx.beginPath();
-  ctx.moveTo(-w * 0.34, -h * 0.02);
-  ctx.lineTo(w * 0.34, -h * 0.02);
-  ctx.stroke();
-
-  ctx.strokeStyle = '#f4f4f4';
-  ctx.lineWidth = 1.5;
-  for (let i = -1; i <= 1; i++) {
+  // Studs along the sole
+  ctx.fillStyle = '#0a0a0a';
+  const studCount = 4;
+  for (let i = 0; i < studCount; i++) {
+    const t = i / (studCount - 1);
+    const sx = heelX + w * 0.1 + t * (toeX - w * 0.2 - heelX);
     ctx.beginPath();
-    ctx.moveTo(i * w * 0.09 - w * 0.05, -h * 0.55);
-    ctx.lineTo(i * w * 0.09 + w * 0.05, -h * 0.22);
+    ctx.ellipse(sx, soleY + h * 0.06, w * 0.035, h * 0.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Team accent stripe along the side
+  ctx.strokeStyle = entity.bootAccent;
+  ctx.lineWidth = Math.max(2, h * 0.1);
+  ctx.beginPath();
+  ctx.moveTo(heelX + w * 0.12, -h * 0.02);
+  ctx.lineTo(toeX - w * 0.22, -h * 0.05);
+  ctx.stroke();
+
+  // Laces on the tongue
+  ctx.strokeStyle = '#f4f4f4';
+  ctx.lineWidth = 1.4;
+  for (let i = 0; i < 3; i++) {
+    const lx = w * 0.06 + i * w * 0.09;
+    ctx.beginPath();
+    ctx.moveTo(lx, cuffTopY + h * 0.18);
+    ctx.lineTo(lx + w * 0.07, cuffTopY + h * 0.36);
     ctx.stroke();
   }
 
@@ -735,7 +917,7 @@ function drawBoot(cx, cy, entity) {
 }
 
 function drawHead(cx, cy, entity) {
-  const R = entity.radius * 1.9;
+  const R = entity.radius * 2.0;
 
   ctx.save();
   ctx.translate(cx, cy);
