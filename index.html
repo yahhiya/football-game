@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Head Soccer — v6 (arcade wide)</title>
+<title>Head Soccer Arcade — v7</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -30,10 +30,13 @@
     margin-top: 10px;
     font-size: 13px;
     color: #9fcbb0;
-    max-width: 760px;
+    max-width: 780px;
     text-align: center;
     padding: 0 12px;
+    line-height: 1.5;
   }
+
+  #instructions strong { color: #eafaf0; }
 
   /* Fixed-aspect arcade viewport — wide "mobile landscape" framing */
   #arcade-frame {
@@ -55,42 +58,39 @@
     background: #05130c;
     border-radius: 8px;
     box-shadow: inset 0 0 24px rgba(0,0,0,0.6);
+    cursor: pointer;
   }
 </style>
 </head>
 <body>
 
-<h1>⚽ Head Soccer — v6</h1>
+<h1>⚽ Head Soccer Arcade — v7</h1>
 
 <div id="arcade-frame">
   <canvas id="field" width="900" height="400"></canvas>
 </div>
 
 <div id="instructions">
-  <strong>Click the field once to give it keyboard focus.</strong>
-  A/D or Left/Right to move. W, Up, or Space to jump. Press <strong>J</strong>
-  for a low drive or <strong>K</strong> for a high lofted shot — the boot
-  always swings the instant you press it. Headers happen automatically —
-  just jump into it. First to lead when the 60-second clock hits zero wins.
-  Press <strong>R</strong> to restart after full time.
+  <strong>Click a mode on the Main Menu to kick off.</strong><br>
+  <strong>Player 1:</strong> A/D move · W jump · J low shot · K high shot · <strong>L</strong> Super Bicycle Kick.
+  <strong>Player 2 (2P mode):</strong> Arrow keys move/jump · N low shot · M high shot · <strong>,</strong> Super Bicycle Kick.
+  Headers happen automatically — just jump into it. Squeeze the ball between both players and watch it pop skyward.
+  First to lead when the 60-second clock hits zero wins the crown. Press <strong>R</strong> to restart after full time.
 </div>
 
 <script>
 /* =====================================================================
-   HEAD SOCCER — V6 (ground-up arcade rebuild)
+   HEAD SOCCER ARCADE — V7
 
-   Rebuilt from v5 per playtest notes:
-     - wider, shorter, mobile-arcade field proportions
-     - shorter/sleeker goals so there's real room to defend
-     - ball can never fully flatten out — a minimum bounce keeps it alive
-     - boot hitboxes are sloped heel-to-toe capsules, not flat blocks,
-       so the ball gets squeezed/popped upward instead of trapped
-     - kick key presses ALWAYS trigger the visual swing; the active
-       kick hitbox is a separate, decoupled check that only lands a
-       shot if the ball is in the swing's path during its active window
-     - full arcade match loop: pregame countdown, 60s clock, goal burst,
-       fair concession kickoff, full-time screen
-     - on-canvas scoreboard + stadium-at-night visuals
+   Rebuilt on top of the v6 arcade engine with:
+     - stylized "Hamza-Eyes" facial rendering (Arabic letter ء motif)
+     - a golden victory crown rendered on the winner at full time
+     - anti-jamming "squeeze force" so the ball can never get pinned
+       flat between two grounded hitboxes — it pops upward instead
+     - a Main Menu with 1P (vs AI) / 2P (couch PvP) mode select
+     - synthesized Web Audio arcade sound effects (kick / goal / buzzer)
+     - a once-per-30s Super Bicycle Kick special move with a flipping
+       animation, a fiery trail, and a cooldown-ring HUD element
    ===================================================================== */
 
 const canvas = document.getElementById('field');
@@ -99,16 +99,16 @@ const ctx = canvas.getContext('2d');
 const CANVAS_W = canvas.width;   // 900 — fixed arcade viewport (internal resolution)
 const CANVAS_H = canvas.height;  // 400
 
-// ---- HUD strip reserved at the top for the scoreboard/timer ----
-const HUD_HEIGHT = 46;
+// ---- HUD strip reserved at the top for the scoreboard/timer/cooldowns ----
+const HUD_HEIGHT = 54;
 
 // ---- The pitch, in plain screen coordinates ----
 const GROUND_Y = 360;
 const GOAL_X_LEFT = 60;
 const GOAL_X_RIGHT = 840;
-const GOAL_HEIGHT = 95;        // noticeably shorter than v5's 150 — lots of open sky
-const GOAL_NET_DEPTH = 22;     // sleeker/shallower net
-const CEILING_H = GROUND_Y - HUD_HEIGHT - 15; // ~299 — a tall, open playing column
+const GOAL_HEIGHT = 95;
+const GOAL_NET_DEPTH = 22;
+const CEILING_H = GROUND_Y - HUD_HEIGHT - 15;
 
 function groundToScreenY(h) {
   return GROUND_Y - h;
@@ -122,13 +122,60 @@ function moveToward(current, target, maxDelta) {
 }
 
 /* ---------------------------------------------------------------------
+   AUDIO — synthesized arcade SFX via the Web Audio API. No external
+   assets; everything is generated with oscillators + gain envelopes.
+   audioCtx is created lazily on the first user gesture (menu click) to
+   respect autoplay policies.
+   --------------------------------------------------------------------- */
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { audioCtx = null; }
+  } else if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+function playTone(freqStart, freqEnd, duration, type, gainPeak, startDelay) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime + (startDelay || 0);
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freqStart, t);
+  osc.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), t + duration);
+  gain.gain.setValueAtTime(gainPeak, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + duration + 0.02);
+}
+
+function playKickSound() { playTone(180, 55, 0.11, 'sine', 0.32); }
+function playSpecialImpactSound() {
+  playTone(260, 50, 0.22, 'sawtooth', 0.4);
+  playTone(760, 90, 0.16, 'square', 0.16, 0.02);
+}
+function playSpecialWhooshSound() { playTone(900, 250, 0.28, 'sine', 0.14); }
+function playGoalSound() { playTone(220, 1100, 0.55, 'sawtooth', 0.28); }
+function playBuzzerSound() {
+  playTone(430, 410, 0.3, 'square', 0.25);
+  playTone(430, 410, 0.3, 'square', 0.25, 0.35);
+}
+function playMenuSelectSound() { playTone(500, 750, 0.12, 'triangle', 0.25); }
+function playSqueezePopSound() { playTone(140, 480, 0.14, 'sine', 0.22); }
+
+/* ---------------------------------------------------------------------
    MATCH STATE MACHINE
-   'countdown' -> 'playing' -> 'goal' -> 'playing' -> ... -> 'fulltime'
+   'menu' -> 'countdown' -> 'playing' -> 'goal' -> 'playing' -> ... -> 'fulltime'
    --------------------------------------------------------------------- */
 let scoreLeft = 0;
 let scoreRight = 0;
 let matchTime = 60;
-let gameState = 'countdown';
+let gameState = 'menu';
+let gameMode = null; // '1p' or '2p'
 
 const COUNTDOWN_PHASES = ['3', '2', '1', 'GO!'];
 const COUNTDOWN_PHASE_DURATION = 0.8;
@@ -138,6 +185,26 @@ let countdownTimer = COUNTDOWN_PHASE_DURATION;
 const GOAL_FREEZE_SECONDS = 1.6;
 let goalTimer = 0;
 let pendingConcedingSide = null; // 'left' or 'right' — whose goal was just scored in
+
+/* ---------------------------------------------------------------------
+   MAIN MENU
+   --------------------------------------------------------------------- */
+const MENU_BTN_W = 260, MENU_BTN_H = 74;
+const menuButtons = [
+  { mode: '1p', label: '1 PLAYER', sub: 'VS COMPUTER AI', x: CANVAS_W / 2 - MENU_BTN_W - 20, y: 168 },
+  { mode: '2p', label: '2 PLAYERS', sub: 'LOCAL COUCH PvP', x: CANVAS_W / 2 + 20, y: 168 }
+];
+let menuHover = null;
+
+function getCanvasCoords(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = CANVAS_W / rect.width;
+  const scaleY = CANVAS_H / rect.height;
+  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+}
+function hitTestMenuButtons(x, y) {
+  return menuButtons.find(b => x >= b.x && x <= b.x + MENU_BTN_W && y >= b.y && y <= b.y + MENU_BTN_H) || null;
+}
 
 /* ---------------------------------------------------------------------
    GAME LOOP
@@ -166,17 +233,22 @@ window.addEventListener('keydown', e => {
   if (MOVE_KEYS.includes(key)) e.preventDefault();
 
   if (gameState === 'playing') {
-    // The boot ALWAYS swings the instant the key is pressed — the kick
-    // animation is never gated on ball proximity. Whether it actually
-    // connects is resolved separately by updateKickHits() during the
-    // swing's active window (see below).
+    // Player 1 — always active
     if (key === 'j') { e.preventDefault(); doKick(player, 'low'); }
     if (key === 'k') { e.preventDefault(); doKick(player, 'high'); }
+    if (key === 'l') { e.preventDefault(); doSpecial(player); }
+
+    // Player 2 — only responds to human input in 2P mode
+    if (gameMode === '2p') {
+      if (key === 'n') { e.preventDefault(); doKick(opponent, 'low'); }
+      if (key === 'm') { e.preventDefault(); doKick(opponent, 'high'); }
+      if (key === ',') { e.preventDefault(); doSpecial(opponent); }
+    }
   }
 
   if (key === 'r' && gameState === 'fulltime') {
     e.preventDefault();
-    restartMatch();
+    startMatch();
   }
 });
 window.addEventListener('keyup', e => {
@@ -185,15 +257,31 @@ window.addEventListener('keyup', e => {
 
 canvas.tabIndex = 0;
 canvas.style.outline = 'none';
-canvas.addEventListener('click', () => canvas.focus());
+canvas.addEventListener('click', (e) => {
+  canvas.focus();
+  if (gameState === 'menu') {
+    const { x, y } = getCanvasCoords(e);
+    const btn = hitTestMenuButtons(x, y);
+    if (btn) {
+      ensureAudio();
+      playMenuSelectSound();
+      gameMode = btn.mode;
+      startMatch();
+    }
+  }
+});
+canvas.addEventListener('mousemove', (e) => {
+  if (gameState !== 'menu') { menuHover = null; return; }
+  const { x, y } = getCanvasCoords(e);
+  const btn = hitTestMenuButtons(x, y);
+  menuHover = btn ? btn.mode : null;
+});
 window.addEventListener('load', () => canvas.focus());
 canvas.focus();
 
 /* ---------------------------------------------------------------------
    ENTITIES
    --------------------------------------------------------------------- */
-// Players are scaled down slightly from v5 (radius 14 -> 11) so the wider
-// field reads as open space rather than being filled up by characters.
 const PLAYER_RADIUS = 11;
 
 function makePlayer(config) {
@@ -205,6 +293,9 @@ function makePlayer(config) {
     kickTimer: 0,
     kickType: null,
     kickHasHit: false,
+    specialCooldown: 0,
+    specialTimer: 0,
+    specialHasHit: false,
   }, config);
 }
 
@@ -243,7 +334,10 @@ const ball = {
   vh: 0,
   radius: 11,
   color: '#fff8dc',
-  dark: '#c9a86a'
+  dark: '#c9a86a',
+  trail: [],
+  fireTrailTimer: 0,
+  squeezeCooldown: 0
 };
 
 // ---- Tuning constants ----
@@ -255,19 +349,14 @@ const GRAVITY_PLAYER_UP = 1400;
 const GRAVITY_PLAYER_DOWN = 2000;
 const JUMP_VELOCITY = 600;
 
-// Ball physics — tuned for CONTINUOUS bounciness. The ball must never
-// flatten out: restitution is high, and after every ground bounce a
-// floor is applied to the rebound speed (BALL_MIN_BOUNCE_VH) so it can
-// never decay down into a dead, flat roll. It settles into a lively
-// dribble instead of stopping dead.
 const GRAVITY_BALL = 1000;
 const BALL_GROUND_RESTITUTION = 0.86;
 const BALL_WALL_RESTITUTION = 0.68;
 const BALL_COLLISION_RESTITUTION = 0.78;
 const BALL_AIR_DRAG_PER_SECOND = 0.16;
 const BALL_GROUND_FRICTION_PER_SECOND = 0.45;
-const BALL_MIN_BOUNCE_VH = 95;      // a bounce can never be gentler than this — no flat traps
-const BALL_MAX_SPEED = 780;
+const BALL_MIN_BOUNCE_VH = 95;
+const BALL_MAX_SPEED = 900;
 
 // Player hitbox geometry (head / boot / torso capsule)
 const HEAD_COLLISION_RADIUS = 21;
@@ -276,36 +365,58 @@ const HEAD_OFFSET = 55;
 const BOOT_OFFSET = 5;
 const BODY_RADIUS = 15;
 
-// Sloped boot hitbox: instead of one flat circle at the ankle, the boot's
-// collision surface is a CAPSULE running from the heel (low, behind the
-// player) up and out to the raised toe (forward, in the attack
-// direction). That slope means a ball squeezed between two players'
-// boots meets an angled surface on both sides — it gets popped upward
-// and out instead of getting pinned flat on the ground between them.
 const BOOT_HEEL_X_OFFSET = 5;
 const BOOT_HEEL_H_OFFSET = BOOT_OFFSET;
 const BOOT_TOE_X_OFFSET = 20;
-const BOOT_TOE_H_OFFSET = BOOT_OFFSET + 11; // toe rides higher than heel — the "slope"
+const BOOT_TOE_H_OFFSET = BOOT_OFFSET + 11;
 
 const KNOCKBACK_FRICTION_PER_SECOND = 0.9;
 
 const SHOOT_RANGE = 70;
 const SHOT_COOLDOWN_SECONDS = 0.5;
 const KICK_ANIM_DURATION = 0.22;
-const KICK_ACTIVE_START = 0.2;   // fraction of the swing during which contact can register
+const KICK_ACTIVE_START = 0.2;
 const KICK_ACTIVE_END = 0.85;
 const LOW_SHOT_SPEED = 520;
 const LOW_SHOT_LIFT = 95;
 const HIGH_SHOT_SPEED = 330;
 const HIGH_SHOT_LIFT = 520;
 
+// ---- Anti-Jamming "Squeeze Force" ----
+// If the ball is wedged near the ground between BOTH players' boot
+// hitboxes at once, it gets an automatic upward pop — like soap
+// squeezed out of a fist — instead of getting pinned flat forever.
+const SQUEEZE_RANGE = BOOT_COLLISION_RADIUS + 21;
+const SQUEEZE_GROUND_H = 34;
+const SQUEEZE_POP_VELOCITY = 560;
+const SQUEEZE_COOLDOWN_SECONDS = 0.45;
+
+// ---- Super Bicycle Kick (special ability) ----
+const SPECIAL_COOLDOWN_SECONDS = 30;
+const SPECIAL_DURATION = 0.7;
+const SPECIAL_ACTIVE_START = 0.15;
+const SPECIAL_ACTIVE_END = 0.9;
+const SPECIAL_HITBOX_RADIUS = HEAD_COLLISION_RADIUS * 1.15;
+const SPECIAL_HIT_SPEED_MULT = 2;
+
+/* ---------------------------------------------------------------------
+   CONTROL SCHEMES
+   --------------------------------------------------------------------- */
+const CONTROLS_P1_SOLO = { left: ['a', 'arrowleft'], right: ['d', 'arrowright'], jump: ['w', 'arrowup', ' '] };
+const CONTROLS_P1_DUO = { left: ['a'], right: ['d'], jump: ['w'] };
+const CONTROLS_P2_DUO = { left: ['arrowleft'], right: ['arrowright'], jump: ['arrowup'] };
+
 /* ---------------------------------------------------------------------
    UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
+  if (gameState === 'menu') {
+    return; // idle preview behind the menu — no physics
+  }
+
   if (gameState === 'countdown') {
     updateCountdown(dt);
-    return; // movement stays locked, ball holds its pregame position
+    return;
   }
 
   if (gameState === 'goal') {
@@ -314,11 +425,11 @@ function update(dt) {
       resetAfterGoal(pendingConcedingSide);
       gameState = 'playing';
     }
-    return; // physics frozen during the goal burst
+    return;
   }
 
   if (gameState === 'fulltime') {
-    return; // everything frozen; waiting for 'R' to restart
+    return;
   }
 
   // ---- 'playing' ----
@@ -326,13 +437,27 @@ function update(dt) {
   if (matchTime <= 0) {
     matchTime = 0;
     gameState = 'fulltime';
+    playBuzzerSound();
     return;
   }
 
-  movePlayer(dt);
-  updateOpponentAI(dt);
+  if (gameMode === '2p') {
+    moveHuman(player, CONTROLS_P1_DUO, dt);
+    moveHuman(opponent, CONTROLS_P2_DUO, dt);
+  } else {
+    moveHuman(player, CONTROLS_P1_SOLO, dt);
+    updateOpponentAI(dt);
+  }
 
   simulateBallSubsteps(dt);
+
+  if (ball.fireTrailTimer > 0) {
+    ball.fireTrailTimer -= dt;
+    ball.trail.push({ x: ball.x, h: ball.h });
+    if (ball.trail.length > 8) ball.trail.shift();
+  } else if (ball.trail.length) {
+    ball.trail.shift();
+  }
 
   handleBodyCollision(player, opponent);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
@@ -352,9 +477,7 @@ function updateCountdown(dt) {
 }
 
 /* ---------------------------------------------------------------------
-   CONTINUOUS COLLISION DETECTION (adaptive substepping) — unchanged
-   approach from v5: split the frame into enough sub-steps that a fast
-   ball can never tunnel through a player or wall between checks.
+   CONTINUOUS COLLISION DETECTION (adaptive substepping)
    --------------------------------------------------------------------- */
 function simulateBallSubsteps(dt) {
   const speed = Math.hypot(ball.vx, ball.vh);
@@ -370,32 +493,35 @@ function simulateBallSubsteps(dt) {
     resolveBallWalls();
     updateKickHits(player);
     updateKickHits(opponent);
+    updateSpecialHits(player);
+    updateSpecialHits(opponent);
     resolveBallWalls();
-    if (handleGoals()) return; // a goal froze the game — stop this frame's remaining sub-steps
+    checkSqueezeForce(subDt);
+    if (handleGoals()) return;
   }
 }
 
-function movePlayer(dt) {
-  updateShotTimers(player, dt);
+function moveHuman(entity, controls, dt) {
+  updateShotTimers(entity, dt);
 
   let dir = 0;
-  if (keys['a'] || keys['arrowleft']) dir -= 1;
-  if (keys['d'] || keys['arrowright']) dir += 1;
+  if (controls.left.some(k => keys[k])) dir -= 1;
+  if (controls.right.some(k => keys[k])) dir += 1;
 
-  const targetVx = dir * player.speed;
+  const targetVx = dir * entity.speed;
   const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
-  player.vx = moveToward(player.vx, targetVx, accel * dt);
-  player.x += player.vx * dt;
+  entity.vx = moveToward(entity.vx, targetVx, accel * dt);
+  entity.x += entity.vx * dt;
 
-  if ((keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
-    player.vh = JUMP_VELOCITY;
-    player.grounded = false;
+  if (controls.jump.some(k => keys[k]) && entity.grounded) {
+    entity.vh = JUMP_VELOCITY;
+    entity.grounded = false;
   }
 
-  applyGravity(player, dt);
-  applyKnockback(player, dt);
+  applyGravity(entity, dt);
+  applyKnockback(entity, dt);
 
-  player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
+  entity.x = clamp(entity.x, GOAL_X_LEFT + entity.radius, GOAL_X_RIGHT - entity.radius);
 }
 
 function updateOpponentAI(dt) {
@@ -430,6 +556,13 @@ function updateOpponentAI(dt) {
   if (dist < SHOOT_RANGE) {
     const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
     doKick(opponent, shotType);
+  }
+
+  // The AI occasionally busts out its own Super Bicycle Kick when the
+  // ball is nearby and the cooldown is ready.
+  if (opponent.specialCooldown <= 0 && opponent.specialTimer <= 0 &&
+      Math.abs(ball.x - opponent.x) < 160 && Math.random() < 0.004) {
+    doSpecial(opponent);
   }
 
   applyGravity(opponent, dt);
@@ -480,9 +613,6 @@ function resolveBallWalls() {
     ball.h = 0;
     if (ball.vh < 0) {
       ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
-      // Continuous bounciness: a bounce can never be gentler than the
-      // floor below, so the ball keeps arcing through the air forever
-      // instead of decaying into a dead, flat roll on the ground.
       if (ball.vh < BALL_MIN_BOUNCE_VH) ball.vh = BALL_MIN_BOUNCE_VH;
     }
   }
@@ -513,9 +643,33 @@ function resolveBallWalls() {
 }
 
 /* ---------------------------------------------------------------------
-   ENTITY HITBOX — head circle + SLOPED BOOT CAPSULE (heel-to-toe) +
-   torso capsule spanning the gap between them. One continuous,
-   angled-at-the-toe hitbox the ball can't get pinned inside.
+   ANTI-JAMMING PHYSICS — Squeeze Force
+   --------------------------------------------------------------------- */
+function checkSqueezeForce(dt) {
+  if (ball.squeezeCooldown > 0) {
+    ball.squeezeCooldown -= dt;
+    return;
+  }
+  if (ball.h >= SQUEEZE_GROUND_H) return;
+
+  const dPlayer = Math.hypot(ball.x - player.x, ball.h - (player.h + BOOT_OFFSET));
+  const dOpp = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
+  if (dPlayer > SQUEEZE_RANGE || dOpp > SQUEEZE_RANGE) return;
+
+  // Roughly wedged between the two — the ball sits on or near the line
+  // between them rather than off to one side of both.
+  const straddled = (ball.x - player.x) * (ball.x - opponent.x) <= (SQUEEZE_RANGE * 4);
+  const playersClose = Math.abs(player.x - opponent.x) < (player.radius + opponent.radius) * 2 + 46;
+  if (!straddled || !playersClose) return;
+
+  ball.vh = SQUEEZE_POP_VELOCITY;
+  ball.vx += (Math.random() - 0.5) * 180;
+  ball.squeezeCooldown = SQUEEZE_COOLDOWN_SECONDS;
+  playSqueezePopSound();
+}
+
+/* ---------------------------------------------------------------------
+   ENTITY HITBOX — head circle + sloped boot capsule + torso capsule
    --------------------------------------------------------------------- */
 function pointOverlap(cx, cH, cR, kickPower) {
   const dx = ball.x - cx;
@@ -530,9 +684,6 @@ function pointOverlap(cx, cH, cR, kickPower) {
   };
 }
 
-// General 2D capsule: closest point on the segment (x1,h1)-(x2,h2) to the
-// ball, then a normal point-circle overlap from there. Used both for the
-// sloped boot (a diagonal segment) and the torso (a vertical segment).
 function capsuleOverlap(x1, h1, x2, h2, cR, kickPower) {
   const dx = x2 - x1, dh = h2 - h1;
   const lenSq = dx * dx + dh * dh;
@@ -584,15 +735,6 @@ function handleEntityBallCollision(entity) {
 
 /* ---------------------------------------------------------------------
    KICKS — decoupled from ball contact.
-
-   doKick() ALWAYS starts the visual swing the instant the key is
-   pressed (subject only to the shot cooldown, so the game doesn't turn
-   into a machine-gun of kicks) — never gated on ball distance.
-
-   updateKickHits() is the separate, active hitbox check: while the
-   swing is in its active window it tracks a point sweeping along the
-   same path the boot is visibly swinging through, and only THEN can it
-   actually strike the ball — once per swing, matching what's on screen.
    --------------------------------------------------------------------- */
 function doKick(entity, type) {
   if (entity.shotCooldown > 0) return false;
@@ -603,13 +745,11 @@ function doKick(entity, type) {
   return true;
 }
 
-// Mirrors the geometry used by drawBoot()'s swing so the hitbox tracks
-// what's actually on screen.
 function kickSweepPoint(entity) {
   const w = entity.radius * 3.1;
   const h = entity.radius * 1.9;
   const progress = 1 - entity.kickTimer / KICK_ANIM_DURATION;
-  const swing = Math.sin(progress * Math.PI); // 0 -> 1 -> 0 across the swing
+  const swing = Math.sin(progress * Math.PI);
 
   if (entity.kickType === 'low') {
     return {
@@ -642,11 +782,45 @@ function updateKickHits(entity) {
   ball.vx = entity.attackDir * speed + entity.vx * 0.25;
   ball.vh = lift + entity.vh * 0.25;
   entity.kickHasHit = true;
+  playKickSound();
+}
+
+/* ---------------------------------------------------------------------
+   SUPER BICYCLE KICK — special ability
+   --------------------------------------------------------------------- */
+function doSpecial(entity) {
+  if (entity.specialCooldown > 0 || entity.specialTimer > 0) return false;
+  entity.specialTimer = SPECIAL_DURATION;
+  entity.specialCooldown = SPECIAL_COOLDOWN_SECONDS;
+  entity.specialHasHit = false;
+  entity.vh = Math.max(entity.vh, JUMP_VELOCITY * 0.85);
+  entity.vx += entity.attackDir * 140;
+  playSpecialWhooshSound();
+  return true;
+}
+
+function updateSpecialHits(entity) {
+  if (entity.specialTimer <= 0 || entity.specialHasHit) return;
+
+  const progress = 1 - entity.specialTimer / SPECIAL_DURATION;
+  if (progress < SPECIAL_ACTIVE_START || progress > SPECIAL_ACTIVE_END) return;
+
+  const cx = entity.x, cH = entity.h + HEAD_OFFSET * 0.5;
+  const dist = Math.hypot(ball.x - cx, ball.h - cH);
+  if (dist > SPECIAL_HITBOX_RADIUS + ball.radius) return;
+
+  ball.vx = entity.attackDir * HIGH_SHOT_SPEED * SPECIAL_HIT_SPEED_MULT + entity.vx * 0.2;
+  ball.vh = HIGH_SHOT_LIFT * 1.15 + Math.abs(entity.vh) * 0.2;
+  entity.specialHasHit = true;
+  ball.fireTrailTimer = 0.8;
+  playSpecialImpactSound();
 }
 
 function updateShotTimers(entity, dt) {
   entity.shotCooldown = Math.max(0, entity.shotCooldown - dt);
   entity.kickTimer = Math.max(0, entity.kickTimer - dt);
+  entity.specialCooldown = Math.max(0, entity.specialCooldown - dt);
+  entity.specialTimer = Math.max(0, entity.specialTimer - dt);
 }
 
 function handleBodyCollision(a, b) {
@@ -675,12 +849,14 @@ function handleBodyCollision(a, b) {
 function handleGoals() {
   if (ball.x + ball.radius < GOAL_X_LEFT) {
     scoreRight++;
-    triggerGoal('left'); // left goal conceded
+    playGoalSound();
+    triggerGoal('left');
     return true;
   }
   if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
-    triggerGoal('right'); // right goal conceded
+    playGoalSound();
+    triggerGoal('right');
     return true;
   }
   return false;
@@ -692,7 +868,7 @@ function triggerGoal(concedingSide) {
   pendingConcedingSide = concedingSide;
 }
 
-function resetEntityForKickoff(entity, x) {
+function resetEntityForKickoff(entity, x, fullReset) {
   entity.x = x;
   entity.h = 0;
   entity.vx = 0;
@@ -703,11 +879,11 @@ function resetEntityForKickoff(entity, x) {
   entity.kickTimer = 0;
   entity.kickType = null;
   entity.kickHasHit = false;
+  entity.specialTimer = 0;
+  entity.specialHasHit = false;
+  if (fullReset) entity.specialCooldown = 0;
 }
 
-// Concession kickoff: the ball drops a little closer to the side that
-// just conceded, rather than dead center, so that player gets a fair
-// first chance to clear it away from their own goal.
 const CONCESSION_BIAS = 110;
 
 function resetAfterGoal(concedingSide) {
@@ -716,12 +892,15 @@ function resetAfterGoal(concedingSide) {
   ball.h = 190;
   ball.vx = 0;
   ball.vh = 0;
+  ball.trail = [];
+  ball.fireTrailTimer = 0;
+  ball.squeezeCooldown = 0;
 
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140, false);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140, false);
 }
 
-function restartMatch() {
+function startMatch() {
   scoreLeft = 0;
   scoreRight = 0;
   matchTime = 60;
@@ -733,9 +912,12 @@ function restartMatch() {
   ball.h = 220;
   ball.vx = 0;
   ball.vh = 0;
+  ball.trail = [];
+  ball.fireTrailTimer = 0;
+  ball.squeezeCooldown = 0;
 
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140, true);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140, true);
 }
 
 /* ---------------------------------------------------------------------
@@ -750,6 +932,7 @@ function render() {
   drawEntitiesSorted();
   drawScoreboard();
 
+  if (gameState === 'menu') drawMenuOverlay();
   if (gameState === 'countdown') drawCountdownOverlay();
   if (gameState === 'goal') drawGoalBanner();
   if (gameState === 'fulltime') drawFullTimeOverlay();
@@ -763,8 +946,6 @@ function drawSky() {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, GROUND_Y - HUD_HEIGHT);
 
-  // Distant stadium floodlights + stand silhouette for a "dark stadium
-  // sky" atmosphere instead of a flat gradient.
   ctx.fillStyle = 'rgba(10,16,24,0.85)';
   ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, 22);
   for (let i = 0; i < 14; i++) {
@@ -791,7 +972,6 @@ function drawPitch() {
   const pitchTop = GROUND_Y;
   const pitchH = CANVAS_H - GROUND_Y;
 
-  // Vibrant alternating light/dark turf stripes.
   const stripeW = 44;
   let toggle = false;
   for (let x = 0; x < CANVAS_W; x += stripeW) {
@@ -901,7 +1081,19 @@ function drawGroundShadow(x, h, baseRadius) {
   ctx.fill();
 }
 
+function drawBallTrail() {
+  if (!ball.trail || ball.trail.length === 0) return;
+  ball.trail.forEach((p, i) => {
+    const t = (i + 1) / ball.trail.length;
+    ctx.beginPath();
+    ctx.arc(p.x, groundToScreenY(p.h), ball.radius * (0.4 + 0.5 * t), 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,${120 + Math.floor(80 * t)},20,${0.45 * t})`;
+    ctx.fill();
+  });
+}
+
 function drawBall(entity) {
+  drawBallTrail();
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
   const screenY = groundToScreenY(entity.h);
   ctx.beginPath();
@@ -929,9 +1121,39 @@ function drawCharacter(entity) {
   const bootY = baseY - BOOT_OFFSET;
   const headY = baseY - HEAD_OFFSET;
 
-  drawBoot(entity.x, bootY, entity);
-  drawTorso(entity.x, bootY, headY, entity);
-  drawHead(entity.x, headY, entity);
+  if (entity.specialTimer > 0) {
+    const progress = 1 - entity.specialTimer / SPECIAL_DURATION;
+    const pivotY = baseY - HEAD_OFFSET * 0.55;
+
+    // Fiery motion-trail afterimages behind the flip
+    for (let i = 3; i >= 1; i--) {
+      const backProgress = Math.max(0, progress - i * 0.06);
+      const backAngle = backProgress * Math.PI * 2 * entity.attackDir;
+      ctx.save();
+      ctx.globalAlpha = 0.09 * i;
+      ctx.translate(entity.x, pivotY);
+      ctx.rotate(backAngle);
+      ctx.translate(-entity.x, -pivotY);
+      drawBoot(entity.x, bootY, entity);
+      drawTorso(entity.x, bootY, headY, entity);
+      drawHead(entity.x, headY, entity);
+      ctx.restore();
+    }
+
+    const angle = progress * Math.PI * 2 * entity.attackDir;
+    ctx.save();
+    ctx.translate(entity.x, pivotY);
+    ctx.rotate(angle);
+    ctx.translate(-entity.x, -pivotY);
+    drawBoot(entity.x, bootY, entity);
+    drawTorso(entity.x, bootY, headY, entity);
+    drawHead(entity.x, headY, entity);
+    ctx.restore();
+  } else {
+    drawBoot(entity.x, bootY, entity);
+    drawTorso(entity.x, bootY, headY, entity);
+    drawHead(entity.x, headY, entity);
+  }
 }
 
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
@@ -1068,35 +1290,11 @@ function drawHead(cx, cy, entity) {
 
   drawHair(entity, R);
 
-  ctx.strokeStyle = entity.browColor;
-  ctx.lineWidth = R * 0.14;
-  ctx.lineCap = 'round';
-  [-1, 1].forEach(side => {
-    ctx.beginPath();
-    ctx.moveTo(side * R * 0.14, -R * 0.1);
-    ctx.lineTo(side * R * 0.5, -R * 0.3);
-    ctx.stroke();
-  });
-
-  [-1, 1].forEach(side => {
-    ctx.beginPath();
-    ctx.ellipse(side * R * 0.35, R * 0.03, R * 0.16, R * 0.12, 0, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(side * R * 0.37, R * 0.04, R * 0.07, 0, Math.PI * 2);
-    ctx.fillStyle = entity.eyeColor;
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(side * R * 0.37, R * 0.04, R * 0.03, 0, Math.PI * 2);
-    ctx.fillStyle = '#000';
-    ctx.fill();
-  });
+  // --- Hamza-Eyes: a stylized, fierce eye/eyebrow glyph shaped after
+  // the Arabic letter hamza (ء) — one sharp curling hook stands in for
+  // both eyebrow and eye in a single continuous stroke.
+  drawHamzaEye(-1, R, entity);
+  drawHamzaEye(1, R, entity);
 
   ctx.strokeStyle = 'rgba(0,0,0,0.35)';
   ctx.lineWidth = 1.5;
@@ -1116,6 +1314,45 @@ function drawHead(cx, cy, entity) {
 
   ctx.fillStyle = '#fff';
   roundRectPath(-R * 0.2, R * 0.4, R * 0.4, R * 0.09, R * 0.03);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawHamzaEye(side, R, entity) {
+  ctx.save();
+  ctx.translate(side * R * 0.37, -R * 0.02);
+  ctx.scale(side, 1);
+
+  // A sharp curling hook — the hamza glyph — doubling as brow + eye.
+  ctx.beginPath();
+  ctx.moveTo(-R * 0.17, -R * 0.34);
+  ctx.quadraticCurveTo(R * 0.13, -R * 0.4, R * 0.2, -R * 0.14);
+  ctx.quadraticCurveTo(R * 0.24, R * 0.06, R * 0.06, R * 0.15);
+  ctx.quadraticCurveTo(-R * 0.08, R * 0.2, -R * 0.1, R * 0.06);
+  ctx.lineWidth = R * 0.13;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = entity.browColor;
+  ctx.stroke();
+
+  // A sharp glinting eye core sitting in the curl
+  ctx.beginPath();
+  ctx.arc(R * 0.03, -R * 0.06, R * 0.08, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(R * 0.05, -R * 0.05, R * 0.055, 0, Math.PI * 2);
+  ctx.fillStyle = entity.eyeColor;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(R * 0.06, -R * 0.04, R * 0.025, 0, Math.PI * 2);
+  ctx.fillStyle = '#000';
   ctx.fill();
 
   ctx.restore();
@@ -1155,21 +1392,21 @@ function drawHair(entity, R) {
 }
 
 /* ---------------------------------------------------------------------
-   ARCADE UI — scoreboard, countdown, goal banner, full-time screen
+   ARCADE UI — scoreboard, cooldown badges, countdown, goal banner,
+   full-time screen (with victory crown), main menu
    --------------------------------------------------------------------- */
 function drawScoreboard() {
-  // Panel background
   ctx.fillStyle = '#0b1015';
   ctx.fillRect(0, 0, CANVAS_W, HUD_HEIGHT);
   ctx.fillStyle = 'rgba(255,255,255,0.06)';
   ctx.fillRect(0, HUD_HEIGHT - 3, CANVAS_W, 3);
 
-  // Blue score chip (left)
   drawScoreChip(18, '#1c3a5c', '#3fa7ff', 'BLUE', scoreLeft, 'left');
-  // Red score chip (right)
   drawScoreChip(CANVAS_W - 18, '#5c1c1c', '#ff5b5b', 'RED', scoreRight, 'right');
 
-  // Center timer
+  drawSpecialBadge(196, HUD_HEIGHT / 2, player, '#3fa7ff', 'L');
+  drawSpecialBadge(CANVAS_W - 196, HUD_HEIGHT / 2, opponent, '#ff5b5b', gameMode === '2p' ? ',' : 'AI');
+
   const timeLeft = Math.max(0, Math.ceil(matchTime));
   const mm = Math.floor(timeLeft / 60);
   const ss = String(timeLeft % 60).padStart(2, '0');
@@ -1181,7 +1418,7 @@ function drawScoreboard() {
 }
 
 function drawScoreChip(edgeX, panelColor, accent, label, score, side) {
-  const w = 150, h = 32, y = 7;
+  const w = 150, h = 32, y = 11;
   const x = side === 'left' ? edgeX : edgeX - w;
 
   roundRectPath(x, y, w, h, 8);
@@ -1203,6 +1440,37 @@ function drawScoreChip(edgeX, panelColor, accent, label, score, side) {
   ctx.textAlign = 'start';
 }
 
+function drawSpecialBadge(x, y, entity, accentColor, keyLabel) {
+  const r = 15;
+  const ready = entity.specialCooldown <= 0 && entity.specialTimer <= 0;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = ready ? '#ffd600' : 'rgba(255,255,255,0.25)';
+  ctx.stroke();
+
+  if (entity.specialCooldown > 0) {
+    const frac = entity.specialCooldown / SPECIAL_COOLDOWN_SECONDS;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.arc(x, y, r - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fill();
+  }
+
+  ctx.fillStyle = ready ? '#ffd600' : accentColor;
+  ctx.font = 'bold 12px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(keyLabel, x, y + 4);
+  ctx.textAlign = 'start';
+  ctx.restore();
+}
+
 function drawCountdownOverlay() {
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
@@ -1221,7 +1489,7 @@ function drawCountdownOverlay() {
 
 function drawGoalBanner() {
   const progress = 1 - goalTimer / GOAL_FREEZE_SECONDS;
-  const pop = Math.min(1, progress / 0.25); // quick pop-in, then hold
+  const pop = Math.min(1, progress / 0.25);
   const scale = 0.6 + 0.4 * Math.min(1, pop);
 
   ctx.fillStyle = `rgba(255,214,0,${0.18 + 0.1 * Math.sin(progress * Math.PI * 6)})`;
@@ -1242,9 +1510,71 @@ function drawGoalBanner() {
   ctx.textAlign = 'start';
 }
 
+function drawVictoryCrown(entity) {
+  const headScreenY = groundToScreenY(entity.h + HEAD_OFFSET);
+  const R = entity.radius * 2.0;
+  const cx = entity.x;
+  const baseY = headScreenY - R * 1.08;
+  const w = R * 1.9, h = R * 1.1;
+
+  ctx.save();
+  ctx.translate(cx, baseY);
+
+  const grad = ctx.createLinearGradient(0, -h, 0, 0);
+  grad.addColorStop(0, '#fff6c8');
+  grad.addColorStop(0.5, '#ffd600');
+  grad.addColorStop(1, '#c9910a');
+
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, 0);
+  ctx.lineTo(-w / 2, -h * 0.35);
+  ctx.lineTo(-w * 0.32, -h * 0.85);
+  ctx.lineTo(-w * 0.14, -h * 0.4);
+  ctx.lineTo(0, -h);
+  ctx.lineTo(w * 0.14, -h * 0.4);
+  ctx.lineTo(w * 0.32, -h * 0.85);
+  ctx.lineTo(w / 2, -h * 0.35);
+  ctx.lineTo(w / 2, 0);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#8a6300';
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fillRect(-w / 2, -h * 0.18, w, h * 0.12);
+
+  const jewelColors = ['#ff4d4d', '#3fa7ff', '#4dff88'];
+  [-w * 0.32, 0, w * 0.32].forEach((jx, i) => {
+    ctx.beginPath();
+    ctx.arc(jx, -h * (i === 1 ? 0.78 : 0.62), R * 0.09, 0, Math.PI * 2);
+    ctx.fillStyle = jewelColors[i];
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.stroke();
+  });
+
+  const t = performance.now() / 300;
+  ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t);
+  ctx.beginPath();
+  ctx.arc(w * 0.36, -h * 0.9, 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+}
+
 function drawFullTimeOverlay() {
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
+
+  if (scoreLeft !== scoreRight) {
+    const winner = scoreLeft > scoreRight ? player : opponent;
+    drawVictoryCrown(winner);
+  }
 
   const cx = CANVAS_W / 2;
   const cy = HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2;
@@ -1255,7 +1585,6 @@ function drawFullTimeOverlay() {
   ctx.fillText('FULL TIME', cx, cy - 26);
 
   ctx.font = 'bold 26px Segoe UI, Arial, sans-serif';
-  ctx.fillStyle = '#3fa7ff';
   const resultText = scoreLeft === scoreRight
     ? `${scoreLeft} — ${scoreRight}  DRAW`
     : scoreLeft > scoreRight
@@ -1267,6 +1596,47 @@ function drawFullTimeOverlay() {
   ctx.font = '16px Segoe UI, Arial, sans-serif';
   ctx.fillStyle = '#9fcbb0';
   ctx.fillText('Press R to restart', cx, cy + 44);
+  ctx.textAlign = 'start';
+}
+
+function drawMenuOverlay() {
+  ctx.fillStyle = 'rgba(4,8,14,0.72)';
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd600';
+  ctx.font = 'bold 40px Segoe UI, Arial, sans-serif';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 10;
+  ctx.fillText('HEAD SOCCER ARCADE', CANVAS_W / 2, HUD_HEIGHT + 64);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#9fcbb0';
+  ctx.font = '14px Segoe UI, Arial, sans-serif';
+  ctx.fillText('Choose a game mode to kick off', CANVAS_W / 2, HUD_HEIGHT + 92);
+
+  menuButtons.forEach(btn => {
+    const hover = menuHover === btn.mode;
+    roundRectPath(btn.x, btn.y, MENU_BTN_W, MENU_BTN_H, 12);
+    ctx.fillStyle = hover ? 'rgba(63,167,255,0.28)' : 'rgba(255,255,255,0.08)';
+    ctx.fill();
+    ctx.lineWidth = hover ? 3 : 2;
+    ctx.strokeStyle = hover ? '#ffd600' : 'rgba(255,255,255,0.35)';
+    ctx.stroke();
+
+    ctx.fillStyle = '#eafaf0';
+    ctx.font = 'bold 20px Segoe UI, Arial, sans-serif';
+    ctx.fillText(btn.label, btn.x + MENU_BTN_W / 2, btn.y + 30);
+
+    ctx.fillStyle = '#9fcbb0';
+    ctx.font = '11px Segoe UI, Arial, sans-serif';
+    ctx.fillText(btn.sub, btn.x + MENU_BTN_W / 2, btn.y + 52);
+  });
+
+  ctx.fillStyle = '#9fcbb0';
+  ctx.font = '12px Segoe UI, Arial, sans-serif';
+  ctx.fillText('P1: WASD move · J/K shoot · L special', CANVAS_W / 2, 300);
+  ctx.fillText('P2 (2P mode): Arrows move · N/M shoot · , special', CANVAS_W / 2, 320);
   ctx.textAlign = 'start';
 }
 
