@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Head Soccer — v5 (arcade tight)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Head Soccer — v6 (arcade wide)</title>
 <style>
+  * { box-sizing: border-box; }
   body {
     margin: 0;
     min-height: 100vh;
@@ -11,125 +13,134 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: radial-gradient(ellipse at center, #1a3326 0%, #0a1810 100%);
+    background: radial-gradient(ellipse at center, #182028 0%, #05070a 100%);
     font-family: 'Segoe UI', Arial, sans-serif;
     color: #eafaf0;
+    padding: 12px 0;
   }
 
   h1 {
-    margin: 12px 0 4px;
-    font-size: 22px;
+    margin: 4px 0 10px;
+    font-size: 20px;
     letter-spacing: 1px;
-  }
-
-  #hud {
-    display: flex;
-    gap: 32px;
-    margin-bottom: 8px;
-    font-size: 18px;
+    text-shadow: 0 2px 6px rgba(0,0,0,0.6);
   }
 
   #instructions {
-    margin-top: 8px;
+    margin-top: 10px;
     font-size: 13px;
     color: #9fcbb0;
-    max-width: 700px;
+    max-width: 760px;
     text-align: center;
+    padding: 0 12px;
   }
 
-  /* Fixed arcade viewport — a crisp, locked window regardless of the
-     browser size around it, framed like a cabinet screen bezel. */
+  /* Fixed-aspect arcade viewport — wide "mobile landscape" framing */
   #arcade-frame {
-    padding: 14px;
+    padding: 10px;
     background: linear-gradient(155deg, #2b2b2b, #0f0f0f);
-    border-radius: 16px;
+    border-radius: 18px;
     box-shadow:
       0 0 0 2px rgba(255,255,255,0.06),
       0 16px 40px rgba(0,0,0,0.55),
       inset 0 1px 0 rgba(255,255,255,0.08);
+    width: min(96vw, 940px);
   }
 
   canvas {
     display: block;
-    width: 800px;
-    height: 450px;
-    background: #0d2a1c;
-    border-radius: 6px;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 900 / 400;
+    background: #05130c;
+    border-radius: 8px;
     box-shadow: inset 0 0 24px rgba(0,0,0,0.6);
   }
 </style>
 </head>
 <body>
 
-<h1>⚽ Head Soccer — v5</h1>
-<div id="hud">
-  <div>Blue (you): <span id="scoreLeft">0</span></div>
-  <div>Red (AI): <span id="scoreRight">0</span></div>
-</div>
+<h1>⚽ Head Soccer — v6</h1>
 
 <div id="arcade-frame">
-  <canvas id="field" width="800" height="450"></canvas>
+  <canvas id="field" width="900" height="400"></canvas>
 </div>
 
 <div id="instructions">
   <strong>Click the field once to give it keyboard focus.</strong>
-  A/D or Left/Right to move. W, Up, or Space to jump. Get close to the
-  ball and press <strong>J</strong> for a low drive or <strong>K</strong>
-  for a high lofted shot. Headers happen automatically — just jump into it.
+  A/D or Left/Right to move. W, Up, or Space to jump. Press <strong>J</strong>
+  for a low drive or <strong>K</strong> for a high lofted shot — the boot
+  always swings the instant you press it. Headers happen automatically —
+  just jump into it. First to lead when the 60-second clock hits zero wins.
+  Press <strong>R</strong> to restart after full time.
 </div>
 
 <script>
 /* =====================================================================
-   HEAD SOCCER — V5 (arcade-tight rebuild)
+   HEAD SOCCER — V6 (ground-up arcade rebuild)
 
-   This pass focuses on FEEL and ROBUSTNESS rather than new features:
-     - fixed viewport sizing
-     - continuous collision detection (adaptive substepping) so the
-       ball can't tunnel through anything at high speed
-     - acceleration-based movement instead of instant velocity snaps
-     - asymmetric jump gravity (rises fast, falls faster) for a tight,
-       responsive jump arc
-     - a proper boot silhouette instead of a blob + rectangle
+   Rebuilt from v5 per playtest notes:
+     - wider, shorter, mobile-arcade field proportions
+     - shorter/sleeker goals so there's real room to defend
+     - ball can never fully flatten out — a minimum bounce keeps it alive
+     - boot hitboxes are sloped heel-to-toe capsules, not flat blocks,
+       so the ball gets squeezed/popped upward instead of trapped
+     - kick key presses ALWAYS trigger the visual swing; the active
+       kick hitbox is a separate, decoupled check that only lands a
+       shot if the ball is in the swing's path during its active window
+     - full arcade match loop: pregame countdown, 60s clock, goal burst,
+       fair concession kickoff, full-time screen
+     - on-canvas scoreboard + stadium-at-night visuals
    ===================================================================== */
 
 const canvas = document.getElementById('field');
 const ctx = canvas.getContext('2d');
 
-const CANVAS_W = canvas.width;   // 800 — fixed arcade viewport
-const CANVAS_H = canvas.height;  // 450
+const CANVAS_W = canvas.width;   // 900 — fixed arcade viewport (internal resolution)
+const CANVAS_H = canvas.height;  // 400
+
+// ---- HUD strip reserved at the top for the scoreboard/timer ----
+const HUD_HEIGHT = 46;
 
 // ---- The pitch, in plain screen coordinates ----
-const GROUND_Y = 375;
-const GOAL_X_LEFT = 65;
-const GOAL_X_RIGHT = 735;
-const GOAL_HEIGHT = 150;
-const GOAL_NET_DEPTH = 42;
-const CEILING_H = GROUND_Y - 25;
-
-let scoreLeft = 0;
-let scoreRight = 0;
-
-let kickoffTimer = 0;
-const KICKOFF_FREEZE_SECONDS = 1;
+const GROUND_Y = 360;
+const GOAL_X_LEFT = 60;
+const GOAL_X_RIGHT = 840;
+const GOAL_HEIGHT = 95;        // noticeably shorter than v5's 150 — lots of open sky
+const GOAL_NET_DEPTH = 22;     // sleeker/shallower net
+const CEILING_H = GROUND_Y - HUD_HEIGHT - 15; // ~299 — a tall, open playing column
 
 function groundToScreenY(h) {
   return GROUND_Y - h;
 }
-
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
-
-// Ramp `current` toward `target` by at most `maxDelta` this frame — the
-// building block of acceleration-based movement. Used for both player
-// input and AI steering so both feel equally tight.
 function moveToward(current, target, maxDelta) {
   if (Math.abs(target - current) <= maxDelta) return target;
   return current + Math.sign(target - current) * maxDelta;
 }
 
 /* ---------------------------------------------------------------------
-   1. GAME LOOP
+   MATCH STATE MACHINE
+   'countdown' -> 'playing' -> 'goal' -> 'playing' -> ... -> 'fulltime'
+   --------------------------------------------------------------------- */
+let scoreLeft = 0;
+let scoreRight = 0;
+let matchTime = 60;
+let gameState = 'countdown';
+
+const COUNTDOWN_PHASES = ['3', '2', '1', 'GO!'];
+const COUNTDOWN_PHASE_DURATION = 0.8;
+let countdownIndex = 0;
+let countdownTimer = COUNTDOWN_PHASE_DURATION;
+
+const GOAL_FREEZE_SECONDS = 1.6;
+let goalTimer = 0;
+let pendingConcedingSide = null; // 'left' or 'right' — whose goal was just scored in
+
+/* ---------------------------------------------------------------------
+   GAME LOOP
    --------------------------------------------------------------------- */
 let lastTime = performance.now();
 
@@ -144,7 +155,7 @@ function gameLoop(now) {
 }
 
 /* ---------------------------------------------------------------------
-   2. INPUT
+   INPUT
    --------------------------------------------------------------------- */
 const keys = {};
 const MOVE_KEYS = ['a', 'd', 'arrowleft', 'arrowright', 'w', 'arrowup', ' '];
@@ -153,8 +164,20 @@ window.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
   keys[key] = true;
   if (MOVE_KEYS.includes(key)) e.preventDefault();
-  if (key === 'j') { e.preventDefault(); tryShoot(player, 'low'); }
-  if (key === 'k') { e.preventDefault(); tryShoot(player, 'high'); }
+
+  if (gameState === 'playing') {
+    // The boot ALWAYS swings the instant the key is pressed — the kick
+    // animation is never gated on ball proximity. Whether it actually
+    // connects is resolved separately by updateKickHits() during the
+    // swing's active window (see below).
+    if (key === 'j') { e.preventDefault(); doKick(player, 'low'); }
+    if (key === 'k') { e.preventDefault(); doKick(player, 'high'); }
+  }
+
+  if (key === 'r' && gameState === 'fulltime') {
+    e.preventDefault();
+    restartMatch();
+  }
 });
 window.addEventListener('keyup', e => {
   keys[e.key.toLowerCase()] = false;
@@ -167,21 +190,28 @@ window.addEventListener('load', () => canvas.focus());
 canvas.focus();
 
 /* ---------------------------------------------------------------------
-   3. ENTITIES
+   ENTITIES
    --------------------------------------------------------------------- */
-const player = {
-  x: GOAL_X_LEFT + 150,
-  h: 0,
-  vx: 0,
-  vh: 0,
-  grounded: true,
-  knockX: 0,
-  radius: 14,
-  speed: 280,
+// Players are scaled down slightly from v5 (radius 14 -> 11) so the wider
+// field reads as open space rather than being filled up by characters.
+const PLAYER_RADIUS = 11;
+
+function makePlayer(config) {
+  return Object.assign({
+    x: 0, h: 0, vx: 0, vh: 0,
+    grounded: true, knockX: 0,
+    radius: PLAYER_RADIUS,
+    shotCooldown: 0,
+    kickTimer: 0,
+    kickType: null,
+    kickHasHit: false,
+  }, config);
+}
+
+const player = makePlayer({
+  x: GOAL_X_LEFT + 140,
+  speed: 260,
   attackDir: 1,
-  shotCooldown: 0,
-  kickTimer: 0,
-  kickType: null,
   skin: '#e3a874',
   hairColor: '#e8b23d',
   hairStyle: 'spiky',
@@ -190,21 +220,12 @@ const player = {
   jerseyColor: '#3fa7ff',
   bootColor: '#152233',
   bootAccent: '#3fa7ff'
-};
+});
 
-const opponent = {
-  x: GOAL_X_RIGHT - 150,
-  h: 0,
-  vx: 0,
-  vh: 0,
-  grounded: true,
-  knockX: 0,
-  radius: 14,
-  speed: 225,
+const opponent = makePlayer({
+  x: GOAL_X_RIGHT - 140,
+  speed: 205,
   attackDir: -1,
-  shotCooldown: 0,
-  kickTimer: 0,
-  kickType: null,
   skin: '#d99a6c',
   hairColor: '#241a12',
   hairStyle: 'side',
@@ -213,78 +234,98 @@ const opponent = {
   jerseyColor: '#ff5b5b',
   bootColor: '#1a1414',
   bootAccent: '#ff5b5b'
-};
+});
 
 const ball = {
   x: CANVAS_W / 2,
-  h: 200,
+  h: 220,
   vx: 0,
   vh: 0,
-  radius: 14,
+  radius: 11,
   color: '#fff8dc',
   dark: '#c9a86a'
 };
 
 // ---- Tuning constants ----
 
-// Movement: acceleration-based so input feels immediate but not
-// teleport-y. High accel = snaps to full speed almost instantly; high
-// decel = stops on a dime when you let go.
 const MOVE_ACCEL = 3600;
 const MOVE_DECEL = 4400;
 
-// Jump: asymmetric gravity is the classic "tight platformer jump" trick
-// — rising uses a lighter pull so the jump feels responsive and floaty
-// at the top, falling uses a much heavier pull so you come back down
-// fast instead of hanging in the air.
-const GRAVITY_PLAYER_UP = 1500;
-const GRAVITY_PLAYER_DOWN = 2150;
-const JUMP_VELOCITY = 650;
+const GRAVITY_PLAYER_UP = 1400;
+const GRAVITY_PLAYER_DOWN = 2000;
+const JUMP_VELOCITY = 600;
 
-// Ball physics — REBALANCED for a defendable, controllable match instead
-// of a pinball machine. The previous pass over-tuned for "bouncy" and
-// under-tuned for "fair": restitution was too high, drag was too low,
-// and there was no speed ceiling, so a couple of lucky bounces could
-// snowball into a ball moving faster than anyone could react to.
-const GRAVITY_BALL = 1200;
-const BALL_GROUND_RESTITUTION = 0.68;
-const BALL_WALL_RESTITUTION = 0.6;
-const BALL_COLLISION_RESTITUTION = 0.7;
-const BALL_AIR_DRAG_PER_SECOND = 0.22;   // real air resistance now — a kicked ball visibly loses pace
-const BALL_GROUND_FRICTION_PER_SECOND = 0.62;
-const BALL_SETTLE_THRESHOLD = 18;
-const BALL_MAX_SPEED = 780;              // hard cap — nothing can push the ball faster than this, ever
+// Ball physics — tuned for CONTINUOUS bounciness. The ball must never
+// flatten out: restitution is high, and after every ground bounce a
+// floor is applied to the rebound speed (BALL_MIN_BOUNCE_VH) so it can
+// never decay down into a dead, flat roll. It settles into a lively
+// dribble instead of stopping dead.
+const GRAVITY_BALL = 1000;
+const BALL_GROUND_RESTITUTION = 0.86;
+const BALL_WALL_RESTITUTION = 0.68;
+const BALL_COLLISION_RESTITUTION = 0.78;
+const BALL_AIR_DRAG_PER_SECOND = 0.16;
+const BALL_GROUND_FRICTION_PER_SECOND = 0.45;
+const BALL_MIN_BOUNCE_VH = 95;      // a bounce can never be gentler than this — no flat traps
+const BALL_MAX_SPEED = 780;
 
-const HEAD_COLLISION_RADIUS = 27;
-const BOOT_COLLISION_RADIUS = 16;
-const HEAD_OFFSET = 70;
-const BOOT_OFFSET = 7;
-// BUG FIX: the head circle (bottom edge at h=43) and boot circle (top
-// edge at h=23) left a 20px gap with NO collision coverage between
-// them — the ball could slip straight through the middle of a player.
-// BODY_RADIUS defines a capsule (a "torso") spanning that exact gap, so
-// the whole silhouette from boot to head is one unbroken hitbox.
-const BODY_RADIUS = 19;
+// Player hitbox geometry (head / boot / torso capsule)
+const HEAD_COLLISION_RADIUS = 21;
+const BOOT_COLLISION_RADIUS = 13;
+const HEAD_OFFSET = 55;
+const BOOT_OFFSET = 5;
+const BODY_RADIUS = 15;
+
+// Sloped boot hitbox: instead of one flat circle at the ankle, the boot's
+// collision surface is a CAPSULE running from the heel (low, behind the
+// player) up and out to the raised toe (forward, in the attack
+// direction). That slope means a ball squeezed between two players'
+// boots meets an angled surface on both sides — it gets popped upward
+// and out instead of getting pinned flat on the ground between them.
+const BOOT_HEEL_X_OFFSET = 5;
+const BOOT_HEEL_H_OFFSET = BOOT_OFFSET;
+const BOOT_TOE_X_OFFSET = 20;
+const BOOT_TOE_H_OFFSET = BOOT_OFFSET + 11; // toe rides higher than heel — the "slope"
 
 const KNOCKBACK_FRICTION_PER_SECOND = 0.9;
 
-// Shooting — also toned down so a single shot can't cross the whole
-// pitch before the defender has any chance to react.
-const SHOOT_RANGE = 80;
-const SHOT_COOLDOWN_SECONDS = 0.55;
-const KICK_ANIM_DURATION = 0.26;
-const LOW_SHOT_SPEED = 560;
-const LOW_SHOT_LIFT = 70;
-const HIGH_SHOT_SPEED = 360;
-const HIGH_SHOT_LIFT = 660;
+const SHOOT_RANGE = 70;
+const SHOT_COOLDOWN_SECONDS = 0.5;
+const KICK_ANIM_DURATION = 0.22;
+const KICK_ACTIVE_START = 0.2;   // fraction of the swing during which contact can register
+const KICK_ACTIVE_END = 0.85;
+const LOW_SHOT_SPEED = 520;
+const LOW_SHOT_LIFT = 95;
+const HIGH_SHOT_SPEED = 330;
+const HIGH_SHOT_LIFT = 520;
 
 /* ---------------------------------------------------------------------
-   4. UPDATE
+   UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
-  if (kickoffTimer > 0) {
-    kickoffTimer = Math.max(0, kickoffTimer - dt);
-    simulateBallSubsteps(dt); // let it visibly drop/settle during the pause
+  if (gameState === 'countdown') {
+    updateCountdown(dt);
+    return; // movement stays locked, ball holds its pregame position
+  }
+
+  if (gameState === 'goal') {
+    goalTimer -= dt;
+    if (goalTimer <= 0) {
+      resetAfterGoal(pendingConcedingSide);
+      gameState = 'playing';
+    }
+    return; // physics frozen during the goal burst
+  }
+
+  if (gameState === 'fulltime') {
+    return; // everything frozen; waiting for 'R' to restart
+  }
+
+  // ---- 'playing' ----
+  matchTime -= dt;
+  if (matchTime <= 0) {
+    matchTime = 0;
+    gameState = 'fulltime';
     return;
   }
 
@@ -298,37 +339,26 @@ function update(dt) {
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
+function updateCountdown(dt) {
+  countdownTimer -= dt;
+  if (countdownTimer <= 0) {
+    countdownIndex++;
+    if (countdownIndex >= COUNTDOWN_PHASES.length) {
+      gameState = 'playing';
+    } else {
+      countdownTimer = COUNTDOWN_PHASE_DURATION;
+    }
+  }
+}
+
 /* ---------------------------------------------------------------------
-   CONTINUOUS COLLISION DETECTION (adaptive substepping)
-
-   THE PROBLEM: a circle-vs-circle overlap check only catches a
-   collision if the two shapes actually overlap at the moment we check.
-   If the ball is moving fast enough to cross an entire player's
-   diameter within a single frame, it can be on one side before the
-   frame and the other side after — with no frame in between where they
-   ever overlapped. The check technically never fails; it just never
-   runs at the right moment. That's tunneling, and it's why a fast shot
-   could clip straight through a head.
-
-   THE FIX: instead of moving the ball the FULL distance in one big
-   step and checking once, split this frame's motion into several
-   smaller sub-steps — enough that the ball can't move more than about
-   one collider-radius per step — and run the full move+collide check
-   after EACH sub-step. The ball is still checked at every point along
-   its path in practice, just broken into pieces small enough that nothing
-   can hide between checks. Gravity, drag, and everything else scale
-   down proportionally with the smaller time slice, so the total motion
-   over the whole frame comes out the same as before — it's just
-   sampled finely enough to never miss a collision.
+   CONTINUOUS COLLISION DETECTION (adaptive substepping) — unchanged
+   approach from v5: split the frame into enough sub-steps that a fast
+   ball can never tunnel through a player or wall between checks.
    --------------------------------------------------------------------- */
 function simulateBallSubsteps(dt) {
   const speed = Math.hypot(ball.vx, ball.vh);
   const maxStepDistance = Math.max(4, BOOT_COLLISION_RADIUS * 0.8);
-  // Capped at 12 sub-steps/frame purely for performance headroom — that's
-  // still cheap (12 simple collision checks is nothing for a canvas this
-  // size). The cap means the no-tunnel guarantee technically only holds
-  // up to a few thousand px/s; this game's fastest shot tops out around
-  // 700px/s, so there's roughly an order of magnitude of safety margin.
   const steps = clamp(Math.ceil((speed * dt) / maxStepDistance), 1, 12);
   const subDt = dt / steps;
 
@@ -338,7 +368,10 @@ function simulateBallSubsteps(dt) {
     resolveBallWalls();
     handleEntityBallCollision(opponent);
     resolveBallWalls();
-    if (handleGoals()) return; // a goal reset everything — stop this frame's remaining sub-steps
+    updateKickHits(player);
+    updateKickHits(opponent);
+    resolveBallWalls();
+    if (handleGoals()) return; // a goal froze the game — stop this frame's remaining sub-steps
   }
 }
 
@@ -393,8 +426,11 @@ function updateOpponentAI(dt) {
     opponent.grounded = false;
   }
 
-  const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
-  tryShoot(opponent, shotType);
+  const dist = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
+  if (dist < SHOOT_RANGE) {
+    const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
+    doKick(opponent, shotType);
+  }
 
   applyGravity(opponent, dt);
   applyKnockback(opponent, dt);
@@ -442,8 +478,13 @@ function moveBall(dt) {
 function resolveBallWalls() {
   if (ball.h < 0) {
     ball.h = 0;
-    if (ball.vh < 0) ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
-    if (Math.abs(ball.vh) < BALL_SETTLE_THRESHOLD) ball.vh = 0;
+    if (ball.vh < 0) {
+      ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
+      // Continuous bounciness: a bounce can never be gentler than the
+      // floor below, so the ball keeps arcing through the air forever
+      // instead of decaying into a dead, flat roll on the ground.
+      if (ball.vh < BALL_MIN_BOUNCE_VH) ball.vh = BALL_MIN_BOUNCE_VH;
+    }
   }
 
   if (ball.h > CEILING_H) {
@@ -463,11 +504,6 @@ function resolveBallWalls() {
     }
   }
 
-  // Hard speed cap. This runs after every single thing that can change
-  // the ball's velocity (movement, wall bounces, player collisions,
-  // shots), so there's no path — including several bounces stacking
-  // restitution on top of each other — that can sneak the ball above
-  // this speed. That's what keeps the match from snowballing into chaos.
   const speed = Math.hypot(ball.vx, ball.vh);
   if (speed > BALL_MAX_SPEED) {
     const scale = BALL_MAX_SPEED / speed;
@@ -477,16 +513,9 @@ function resolveBallWalls() {
 }
 
 /* ---------------------------------------------------------------------
-   ENTITY HITBOX — head circle + boot circle + a CAPSULE spanning the
-   torso between them (see BODY_RADIUS above). Together these form one
-   continuous vertical hitbox with no gap the ball can slip through.
-
-   Each candidate surface is tested and scored by how deep the ball has
-   penetrated into it; only the single deepest contact is resolved per
-   check. That avoids two overlapping surfaces (say, the capsule and
-   the head) both firing and fighting each other in the same frame,
-   while still guaranteeing the ball gets pushed fully clear of
-   whichever surface it actually hit.
+   ENTITY HITBOX — head circle + SLOPED BOOT CAPSULE (heel-to-toe) +
+   torso capsule spanning the gap between them. One continuous,
+   angled-at-the-toe hitbox the ball can't get pinned inside.
    --------------------------------------------------------------------- */
 function pointOverlap(cx, cH, cR, kickPower) {
   const dx = ball.x - cx;
@@ -501,31 +530,36 @@ function pointOverlap(cx, cH, cR, kickPower) {
   };
 }
 
-// A capsule is just "the closest point on a line segment" instead of a
-// single fixed point — same math as pointOverlap, but the point we
-// measure from slides along the segment first.
-function capsuleOverlap(cx, bottomH, topH, cR, kickPower) {
-  const clampedH = clamp(ball.h, bottomH, topH);
-  return pointOverlap(cx, clampedH, cR, kickPower);
+// General 2D capsule: closest point on the segment (x1,h1)-(x2,h2) to the
+// ball, then a normal point-circle overlap from there. Used both for the
+// sloped boot (a diagonal segment) and the torso (a vertical segment).
+function capsuleOverlap(x1, h1, x2, h2, cR, kickPower) {
+  const dx = x2 - x1, dh = h2 - h1;
+  const lenSq = dx * dx + dh * dh;
+  let t = lenSq > 0 ? ((ball.x - x1) * dx + (ball.h - h1) * dh) / lenSq : 0;
+  t = clamp(t, 0, 1);
+  return pointOverlap(x1 + t * dx, h1 + t * dh, cR, kickPower);
 }
 
 function resolveDeepestContact(entity) {
+  const dir = entity.attackDir;
+  const heelX = entity.x - dir * BOOT_HEEL_X_OFFSET;
+  const heelH = entity.h + BOOT_HEEL_H_OFFSET;
+  const toeX = entity.x + dir * BOOT_TOE_X_OFFSET;
+  const toeH = entity.h + BOOT_TOE_H_OFFSET;
+
   const candidates = [
     pointOverlap(entity.x, entity.h + HEAD_OFFSET, HEAD_COLLISION_RADIUS, 1.1),
-    pointOverlap(entity.x, entity.h + BOOT_OFFSET, BOOT_COLLISION_RADIUS, 1.3),
-    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET, entity.h + HEAD_OFFSET, BODY_RADIUS, 1.15)
+    capsuleOverlap(heelX, heelH, toeX, toeH, BOOT_COLLISION_RADIUS, 1.25),
+    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET, entity.x, entity.h + HEAD_OFFSET, BODY_RADIUS, 1.15)
   ];
 
   let best = null;
   for (const c of candidates) {
-    if (c.penetration > 0 && c.dist > 0 && (!best || c.penetration > best.penetration)) {
-      best = c;
-    }
+    if (c.penetration > 0 && (!best || c.penetration > best.penetration)) best = c;
   }
   if (!best) return false;
 
-  // Push the ball fully clear along the contact normal — never leaves
-  // it embedded, regardless of which surface it hit.
   ball.x += best.nx * best.penetration;
   ball.h += best.nh * best.penetration;
 
@@ -540,11 +574,6 @@ function resolveDeepestContact(entity) {
 }
 
 function handleEntityBallCollision(entity) {
-  // Resolve up to twice: fixing the deepest contact can occasionally
-  // leave a smaller residual overlap with a different part of the
-  // hitbox (e.g. pushing out of the head grazes the capsule) — a
-  // second pass cleans that up so the ball never ends this check still
-  // partially inside the player.
   let hitAny = false;
   for (let pass = 0; pass < 2; pass++) {
     if (resolveDeepestContact(entity)) hitAny = true;
@@ -553,22 +582,66 @@ function handleEntityBallCollision(entity) {
   return hitAny;
 }
 
-function tryShoot(entity, type) {
+/* ---------------------------------------------------------------------
+   KICKS — decoupled from ball contact.
+
+   doKick() ALWAYS starts the visual swing the instant the key is
+   pressed (subject only to the shot cooldown, so the game doesn't turn
+   into a machine-gun of kicks) — never gated on ball distance.
+
+   updateKickHits() is the separate, active hitbox check: while the
+   swing is in its active window it tracks a point sweeping along the
+   same path the boot is visibly swinging through, and only THEN can it
+   actually strike the ball — once per swing, matching what's on screen.
+   --------------------------------------------------------------------- */
+function doKick(entity, type) {
   if (entity.shotCooldown > 0) return false;
+  entity.kickTimer = KICK_ANIM_DURATION;
+  entity.kickType = type;
+  entity.kickHasHit = false;
+  entity.shotCooldown = SHOT_COOLDOWN_SECONDS;
+  return true;
+}
 
-  const dist = Math.hypot(ball.x - entity.x, ball.h - (entity.h + BOOT_OFFSET));
-  if (dist > SHOOT_RANGE) return false;
+// Mirrors the geometry used by drawBoot()'s swing so the hitbox tracks
+// what's actually on screen.
+function kickSweepPoint(entity) {
+  const w = entity.radius * 3.1;
+  const h = entity.radius * 1.9;
+  const progress = 1 - entity.kickTimer / KICK_ANIM_DURATION;
+  const swing = Math.sin(progress * Math.PI); // 0 -> 1 -> 0 across the swing
 
-  const speed = type === 'low' ? LOW_SHOT_SPEED : HIGH_SHOT_SPEED;
-  const lift = type === 'low' ? LOW_SHOT_LIFT : HIGH_SHOT_LIFT;
+  if (entity.kickType === 'low') {
+    return {
+      x: entity.x + entity.attackDir * (w * 0.5 + swing * w * 0.55),
+      h: entity.h + BOOT_OFFSET + swing * h * 0.2,
+      r: BOOT_COLLISION_RADIUS * 1.35,
+      progress
+    };
+  }
+  return {
+    x: entity.x + entity.attackDir * (w * 0.35 + swing * w * 0.4),
+    h: entity.h + BOOT_OFFSET + swing * h * 1.7,
+    r: BOOT_COLLISION_RADIUS * 1.35,
+    progress
+  };
+}
+
+function updateKickHits(entity) {
+  if (entity.kickTimer <= 0 || entity.kickHasHit || !entity.kickType) return;
+
+  const sweep = kickSweepPoint(entity);
+  if (sweep.progress < KICK_ACTIVE_START || sweep.progress > KICK_ACTIVE_END) return;
+
+  const dist = Math.hypot(ball.x - sweep.x, ball.h - sweep.h);
+  if (dist > sweep.r + ball.radius) return;
+
+  const speed = entity.kickType === 'low' ? LOW_SHOT_SPEED : HIGH_SHOT_SPEED;
+  const lift = entity.kickType === 'low' ? LOW_SHOT_LIFT : HIGH_SHOT_LIFT;
 
   ball.vx = entity.attackDir * speed + entity.vx * 0.25;
   ball.vh = lift + entity.vh * 0.25;
-
-  entity.shotCooldown = SHOT_COOLDOWN_SECONDS;
-  entity.kickTimer = KICK_ANIM_DURATION;
-  entity.kickType = type;
-  return true;
+  entity.kickHasHit = true;
 }
 
 function updateShotTimers(entity, dt) {
@@ -596,51 +669,77 @@ function handleBodyCollision(a, b) {
   }
 }
 
+/* ---------------------------------------------------------------------
+   GOALS & MATCH FLOW
+   --------------------------------------------------------------------- */
 function handleGoals() {
   if (ball.x + ball.radius < GOAL_X_LEFT) {
     scoreRight++;
-    document.getElementById('scoreRight').textContent = scoreRight;
-    resetAfterGoal();
+    triggerGoal('left'); // left goal conceded
     return true;
   }
   if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
-    document.getElementById('scoreLeft').textContent = scoreLeft;
-    resetAfterGoal();
+    triggerGoal('right'); // right goal conceded
     return true;
   }
   return false;
 }
 
-function resetAfterGoal() {
-  ball.x = CANVAS_W / 2;
-  ball.h = 200;
+function triggerGoal(concedingSide) {
+  gameState = 'goal';
+  goalTimer = GOAL_FREEZE_SECONDS;
+  pendingConcedingSide = concedingSide;
+}
+
+function resetEntityForKickoff(entity, x) {
+  entity.x = x;
+  entity.h = 0;
+  entity.vx = 0;
+  entity.vh = 0;
+  entity.knockX = 0;
+  entity.grounded = true;
+  entity.shotCooldown = 0;
+  entity.kickTimer = 0;
+  entity.kickType = null;
+  entity.kickHasHit = false;
+}
+
+// Concession kickoff: the ball drops a little closer to the side that
+// just conceded, rather than dead center, so that player gets a fair
+// first chance to clear it away from their own goal.
+const CONCESSION_BIAS = 110;
+
+function resetAfterGoal(concedingSide) {
+  const bias = concedingSide === 'left' ? -CONCESSION_BIAS : CONCESSION_BIAS;
+  ball.x = CANVAS_W / 2 + bias;
+  ball.h = 190;
   ball.vx = 0;
   ball.vh = 0;
 
-  player.x = GOAL_X_LEFT + 150;
-  player.h = 0;
-  player.vx = 0;
-  player.vh = 0;
-  player.knockX = 0;
-  player.grounded = true;
-  player.shotCooldown = 0;
-  player.kickTimer = 0;
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
+}
 
-  opponent.x = GOAL_X_RIGHT - 150;
-  opponent.h = 0;
-  opponent.vx = 0;
-  opponent.vh = 0;
-  opponent.knockX = 0;
-  opponent.grounded = true;
-  opponent.shotCooldown = 0;
-  opponent.kickTimer = 0;
+function restartMatch() {
+  scoreLeft = 0;
+  scoreRight = 0;
+  matchTime = 60;
+  gameState = 'countdown';
+  countdownIndex = 0;
+  countdownTimer = COUNTDOWN_PHASE_DURATION;
 
-  kickoffTimer = KICKOFF_FREEZE_SECONDS;
+  ball.x = CANVAS_W / 2;
+  ball.h = 220;
+  ball.vx = 0;
+  ball.vh = 0;
+
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
 }
 
 /* ---------------------------------------------------------------------
-   5. RENDER
+   RENDER
    --------------------------------------------------------------------- */
 function render() {
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
@@ -649,51 +748,78 @@ function render() {
   drawGoal(true);
   drawGoal(false);
   drawEntitiesSorted();
+  drawScoreboard();
 
-  if (kickoffTimer > 0) {
-    ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-    ctx.fillStyle = '#eafaf0';
-    ctx.font = 'bold 32px Segoe UI, Arial, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('Kickoff!', CANVAS_W / 2, CANVAS_H / 2);
-    ctx.textAlign = 'start';
-  }
+  if (gameState === 'countdown') drawCountdownOverlay();
+  if (gameState === 'goal') drawGoalBanner();
+  if (gameState === 'fulltime') drawFullTimeOverlay();
 }
 
 function drawSky() {
-  const gradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-  gradient.addColorStop(0, '#173049');
-  gradient.addColorStop(1, '#2d5a63');
+  const gradient = ctx.createLinearGradient(0, HUD_HEIGHT, 0, GROUND_Y);
+  gradient.addColorStop(0, '#050b16');
+  gradient.addColorStop(0.55, '#0c1b2e');
+  gradient.addColorStop(1, '#173047');
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, CANVAS_W, GROUND_Y);
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, GROUND_Y - HUD_HEIGHT);
+
+  // Distant stadium floodlights + stand silhouette for a "dark stadium
+  // sky" atmosphere instead of a flat gradient.
+  ctx.fillStyle = 'rgba(10,16,24,0.85)';
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, 22);
+  for (let i = 0; i < 14; i++) {
+    const bx = 20 + i * ((CANVAS_W - 40) / 13);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    ctx.fillRect(bx, HUD_HEIGHT + 4, 3, 14);
+  }
+  const towerXs = [55, CANVAS_W - 55];
+  towerXs.forEach(tx => {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(tx - 4, HUD_HEIGHT + 2, 8, 46);
+    ctx.fillStyle = 'rgba(255,244,214,0.85)';
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        ctx.beginPath();
+        ctx.arc(tx - 8 + c * 8, HUD_HEIGHT + 8 + r * 8, 2.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  });
 }
 
 function drawPitch() {
-  ctx.fillStyle = '#2e7d4f';
-  ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
+  const pitchTop = GROUND_Y;
+  const pitchH = CANVAS_H - GROUND_Y;
 
-  const stripeW = 40;
-  ctx.fillStyle = 'rgba(255,255,255,0.05)';
-  for (let x = 0; x < CANVAS_W; x += stripeW * 2) {
-    ctx.fillRect(x, GROUND_Y, stripeW, CANVAS_H - GROUND_Y);
+  // Vibrant alternating light/dark turf stripes.
+  const stripeW = 44;
+  let toggle = false;
+  for (let x = 0; x < CANVAS_W; x += stripeW) {
+    ctx.fillStyle = toggle ? '#2f8f4e' : '#279043';
+    ctx.fillRect(x, pitchTop, stripeW + 1, pitchH);
+    toggle = !toggle;
   }
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(0, GROUND_Y);
   ctx.lineTo(CANVAS_W, GROUND_Y);
   ctx.stroke();
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 40, 7, 0, Math.PI, Math.PI * 2);
+  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 44, 8, 0, Math.PI, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(CANVAS_W / 2, GROUND_Y - 8);
+  ctx.lineTo(CANVAS_W / 2, HUD_HEIGHT);
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(CANVAS_W / 2, GROUND_Y, 3, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
   ctx.fill();
 }
 
@@ -704,9 +830,9 @@ function drawGoal(isLeft) {
   const rightX = Math.max(frontX, backX);
   const topY = GROUND_Y - GOAL_HEIGHT;
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 1;
-  const spacing = 10;
+  const spacing = 9;
   for (let x = leftX; x <= rightX; x += spacing) {
     ctx.beginPath();
     ctx.moveTo(x, topY);
@@ -721,7 +847,7 @@ function drawGoal(isLeft) {
   }
 
   ctx.strokeStyle = '#eafaf0';
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 4;
   ctx.lineCap = 'round';
 
   ctx.beginPath();
@@ -741,10 +867,10 @@ function drawGoal(isLeft) {
 
   ctx.fillStyle = '#eafaf0';
   ctx.beginPath();
-  ctx.ellipse(frontX, GROUND_Y, 7, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(frontX, GROUND_Y, 6, 2.6, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.beginPath();
-  ctx.ellipse(backX, GROUND_Y, 7, 3, 0, 0, Math.PI * 2);
+  ctx.ellipse(backX, GROUND_Y, 6, 2.6, 0, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.lineCap = 'butt';
@@ -767,7 +893,7 @@ function drawGroundShadow(x, h, baseRadius) {
   const t = clamp(h / 160, 0, 1);
   const rx = baseRadius * (1 - 0.45 * t);
   const ry = baseRadius * 0.32 * (1 - 0.45 * t);
-  const alpha = 0.3 * (1 - 0.5 * t);
+  const alpha = 0.32 * (1 - 0.5 * t);
 
   ctx.beginPath();
   ctx.ellipse(x, GROUND_Y, rx, ry, 0, 0, Math.PI * 2);
@@ -777,7 +903,6 @@ function drawGroundShadow(x, h, baseRadius) {
 
 function drawBall(entity) {
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
-
   const screenY = groundToScreenY(entity.h);
   ctx.beginPath();
   ctx.arc(entity.x, screenY, entity.radius, 0, Math.PI * 2);
@@ -809,13 +934,10 @@ function drawCharacter(entity) {
   drawHead(entity.x, headY, entity);
 }
 
-// The visible "torso" strip fills the same space as the BODY_RADIUS
-// capsule hitbox — so what you see lined up with the physics is
-// exactly what actually blocks the ball, no gap either way.
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
   const width = BODY_RADIUS * 1.7;
-  const top = headScreenY + entity.radius * 0.9;   // tucks up under the chin
-  const bottom = bootScreenY - entity.radius * 0.15; // tucks down into the ankle cuff
+  const top = headScreenY + entity.radius * 0.9;
+  const bottom = bootScreenY - entity.radius * 0.15;
 
   roundRectPath(cx - width / 2, top, width, bottom - top, width * 0.3);
   ctx.fillStyle = entity.jerseyColor;
@@ -839,13 +961,6 @@ function roundRectPath(x, y, w, h, r) {
   ctx.closePath();
 }
 
-/* -----------------------------------------------------------------------
-   BOOT — a proper angled silhouette (heel, arched sole, pointed toe,
-   ankle cuff, studs) instead of an ellipse-plus-rectangle blob. Drawn
-   "pointing" toward +x in local space; ctx.scale(attackDir, 1) below
-   mirrors it to face whichever goal that entity attacks, so the kick
-   swing rotation itself never needs to know which team it's animating.
-   ----------------------------------------------------------------------- */
 function drawBoot(cx, cy, entity) {
   const w = entity.radius * 3.1;
   const h = entity.radius * 1.9;
@@ -860,21 +975,20 @@ function drawBoot(cx, cy, entity) {
 
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.scale(entity.attackDir, 1); // face the attack direction
+  ctx.scale(entity.attackDir, 1);
   ctx.rotate(swingAngle);
 
-  // Boot silhouette: heel (back) -> ankle cuff -> tongue -> toe -> sole -> back to heel
   const heelX = -w * 0.42, toeX = w * 0.52;
   const soleY = h * 0.3, cuffTopY = -h * 0.62;
 
   ctx.beginPath();
-  ctx.moveTo(heelX + w * 0.08, cuffTopY);                                  // ankle back, top
-  ctx.quadraticCurveTo(-w * 0.02, cuffTopY - h * 0.08, w * 0.04, cuffTopY + h * 0.05); // cuff top curve to tongue
-  ctx.quadraticCurveTo(w * 0.34, -h * 0.28, toeX, h * 0.02);                // instep down to toe tip
-  ctx.quadraticCurveTo(w * 0.5, h * 0.22, toeX - w * 0.14, soleY);          // toe curve to ball-of-foot
-  ctx.lineTo(heelX + w * 0.06, soleY);                                     // sole, flat-ish
-  ctx.quadraticCurveTo(heelX - w * 0.04, soleY - h * 0.05, heelX, h * 0.02); // heel bottom curve
-  ctx.quadraticCurveTo(heelX - w * 0.03, cuffTopY + h * 0.25, heelX + w * 0.08, cuffTopY); // heel back up to cuff
+  ctx.moveTo(heelX + w * 0.08, cuffTopY);
+  ctx.quadraticCurveTo(-w * 0.02, cuffTopY - h * 0.08, w * 0.04, cuffTopY + h * 0.05);
+  ctx.quadraticCurveTo(w * 0.34, -h * 0.28, toeX, h * 0.02);
+  ctx.quadraticCurveTo(w * 0.5, h * 0.22, toeX - w * 0.14, soleY);
+  ctx.lineTo(heelX + w * 0.06, soleY);
+  ctx.quadraticCurveTo(heelX - w * 0.04, soleY - h * 0.05, heelX, h * 0.02);
+  ctx.quadraticCurveTo(heelX - w * 0.03, cuffTopY + h * 0.25, heelX + w * 0.08, cuffTopY);
   ctx.closePath();
 
   ctx.fillStyle = entity.bootColor;
@@ -883,7 +997,6 @@ function drawBoot(cx, cy, entity) {
   ctx.strokeStyle = 'rgba(0,0,0,0.45)';
   ctx.stroke();
 
-  // Studs along the sole
   ctx.fillStyle = '#0a0a0a';
   const studCount = 4;
   for (let i = 0; i < studCount; i++) {
@@ -894,7 +1007,6 @@ function drawBoot(cx, cy, entity) {
     ctx.fill();
   }
 
-  // Team accent stripe along the side
   ctx.strokeStyle = entity.bootAccent;
   ctx.lineWidth = Math.max(2, h * 0.1);
   ctx.beginPath();
@@ -902,7 +1014,6 @@ function drawBoot(cx, cy, entity) {
   ctx.lineTo(toeX - w * 0.22, -h * 0.05);
   ctx.stroke();
 
-  // Laces on the tongue
   ctx.strokeStyle = '#f4f4f4';
   ctx.lineWidth = 1.4;
   for (let i = 0; i < 3; i++) {
@@ -1041,6 +1152,122 @@ function drawHair(entity, R) {
     ctx.fill();
     ctx.stroke();
   }
+}
+
+/* ---------------------------------------------------------------------
+   ARCADE UI — scoreboard, countdown, goal banner, full-time screen
+   --------------------------------------------------------------------- */
+function drawScoreboard() {
+  // Panel background
+  ctx.fillStyle = '#0b1015';
+  ctx.fillRect(0, 0, CANVAS_W, HUD_HEIGHT);
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(0, HUD_HEIGHT - 3, CANVAS_W, 3);
+
+  // Blue score chip (left)
+  drawScoreChip(18, '#1c3a5c', '#3fa7ff', 'BLUE', scoreLeft, 'left');
+  // Red score chip (right)
+  drawScoreChip(CANVAS_W - 18, '#5c1c1c', '#ff5b5b', 'RED', scoreRight, 'right');
+
+  // Center timer
+  const timeLeft = Math.max(0, Math.ceil(matchTime));
+  const mm = Math.floor(timeLeft / 60);
+  const ss = String(timeLeft % 60).padStart(2, '0');
+  ctx.textAlign = 'center';
+  ctx.fillStyle = timeLeft <= 10 && gameState === 'playing' ? '#ff6b6b' : '#eafaf0';
+  ctx.font = 'bold 22px Segoe UI, Arial, sans-serif';
+  ctx.fillText(`${mm}:${ss}`, CANVAS_W / 2, HUD_HEIGHT / 2 + 8);
+  ctx.textAlign = 'start';
+}
+
+function drawScoreChip(edgeX, panelColor, accent, label, score, side) {
+  const w = 150, h = 32, y = 7;
+  const x = side === 'left' ? edgeX : edgeX - w;
+
+  roundRectPath(x, y, w, h, 8);
+  ctx.fillStyle = panelColor;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = accent;
+  ctx.stroke();
+
+  ctx.fillStyle = accent;
+  ctx.font = 'bold 12px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = side === 'left' ? 'start' : 'end';
+  ctx.fillText(label, side === 'left' ? x + 12 : x + w - 12, y + h / 2 + 4);
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 20px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = side === 'left' ? 'end' : 'start';
+  ctx.fillText(String(score), side === 'left' ? x + w - 14 : x + 14, y + h / 2 + 7);
+  ctx.textAlign = 'start';
+}
+
+function drawCountdownOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
+
+  const text = COUNTDOWN_PHASES[Math.min(countdownIndex, COUNTDOWN_PHASES.length - 1)];
+  const isGo = text === 'GO!';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = isGo ? '#8fffb0' : '#eafaf0';
+  ctx.font = `bold ${isGo ? 54 : 68}px Segoe UI, Arial, sans-serif`;
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 12;
+  ctx.fillText(text, CANVAS_W / 2, HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2 + 20);
+  ctx.shadowBlur = 0;
+  ctx.textAlign = 'start';
+}
+
+function drawGoalBanner() {
+  const progress = 1 - goalTimer / GOAL_FREEZE_SECONDS;
+  const pop = Math.min(1, progress / 0.25); // quick pop-in, then hold
+  const scale = 0.6 + 0.4 * Math.min(1, pop);
+
+  ctx.fillStyle = `rgba(255,214,0,${0.18 + 0.1 * Math.sin(progress * Math.PI * 6)})`;
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
+
+  const cx = CANVAS_W / 2, cy = HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(scale, scale);
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 84px Segoe UI, Arial, sans-serif';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = '#7a3d00';
+  ctx.strokeText('GOAL!', 0, 20);
+  ctx.fillStyle = '#ffd600';
+  ctx.fillText('GOAL!', 0, 20);
+  ctx.restore();
+  ctx.textAlign = 'start';
+}
+
+function drawFullTimeOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
+
+  const cx = CANVAS_W / 2;
+  const cy = HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 40px Segoe UI, Arial, sans-serif';
+  ctx.fillText('FULL TIME', cx, cy - 26);
+
+  ctx.font = 'bold 26px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#3fa7ff';
+  const resultText = scoreLeft === scoreRight
+    ? `${scoreLeft} — ${scoreRight}  DRAW`
+    : scoreLeft > scoreRight
+      ? `BLUE WINS  ${scoreLeft} — ${scoreRight}`
+      : `RED WINS  ${scoreLeft} — ${scoreRight}`;
+  ctx.fillStyle = '#eafaf0';
+  ctx.fillText(resultText, cx, cy + 12);
+
+  ctx.font = '16px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#9fcbb0';
+  ctx.fillText('Press R to restart', cx, cy + 44);
+  ctx.textAlign = 'start';
 }
 
 // Kick everything off
