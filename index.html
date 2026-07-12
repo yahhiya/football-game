@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Head Soccer Arcade — v7</title>
+<title>Head Soccer Arcade — v9</title>
 <style>
   * { box-sizing: border-box; }
   body {
@@ -64,7 +64,7 @@
 </head>
 <body>
 
-<h1>⚽ Head Soccer Arcade — v7</h1>
+<h1>⚽ Head Soccer Arcade — v9</h1>
 
 <div id="arcade-frame">
   <canvas id="field" width="900" height="400"></canvas>
@@ -72,15 +72,16 @@
 
 <div id="instructions">
   <strong>Click a mode on the Main Menu to kick off.</strong><br>
-  <strong>Player 1:</strong> A/D move · W jump · J low shot · K high shot · <strong>L</strong> Super Bicycle Kick.
-  <strong>Player 2 (2P mode):</strong> Arrow keys move/jump · N low shot · M high shot · <strong>,</strong> Super Bicycle Kick.
+  <strong>Player 1:</strong> A/D move · W jump · C low shot · V high shot.
+  <strong>Player 2 (2P mode):</strong> Arrow keys move/jump · O low shot · P high shot.
   Headers happen automatically — just jump into it. Squeeze the ball between both players and watch it pop skyward.
-  First to lead when the 60-second clock hits zero wins the crown. Press <strong>R</strong> to restart after full time.
+  A <strong>★ star</strong> appears every 10 seconds — knock the ball into it to grab a random powerup: a taller goal, freezing your rival, super speed, or turning into a giant.
+  First to lead when the 60-second clock hits zero wins the crown. At full time, press <strong>R</strong> to rematch the same mode, or <strong>M</strong> to return to the Main Menu and switch modes.
 </div>
 
 <script>
 /* =====================================================================
-   HEAD SOCCER ARCADE — V7
+   HEAD SOCCER ARCADE — V9
 
    Rebuilt on top of the v6 arcade engine with:
      - stylized "Hamza-Eyes" facial rendering (Arabic letter ء motif)
@@ -89,8 +90,12 @@
        flat between two grounded hitboxes — it pops upward instead
      - a Main Menu with 1P (vs AI) / 2P (couch PvP) mode select
      - synthesized Web Audio arcade sound effects (kick / goal / buzzer)
-     - a once-per-30s Super Bicycle Kick special move with a flipping
-       animation, a fiery trail, and a cooldown-ring HUD element
+     - a full-time screen with Rematch (R) and Main Menu (M) options
+     - a random star powerup that spawns every 10 seconds near the
+       middle of the pitch or somewhere random up high — whoever last
+       touched the ball when it hits the star gets a random effect:
+       a taller goal, freezing the other player, super speed, or
+       becoming a giant
    ===================================================================== */
 
 const canvas = document.getElementById('field');
@@ -154,11 +159,10 @@ function playTone(freqStart, freqEnd, duration, type, gainPeak, startDelay) {
 }
 
 function playKickSound() { playTone(180, 55, 0.11, 'sine', 0.32); }
-function playSpecialImpactSound() {
-  playTone(260, 50, 0.22, 'sawtooth', 0.4);
-  playTone(760, 90, 0.16, 'square', 0.16, 0.02);
+function playPowerupSound() {
+  playTone(500, 1200, 0.3, 'triangle', 0.3);
+  playTone(700, 1500, 0.28, 'sine', 0.2, 0.06);
 }
-function playSpecialWhooshSound() { playTone(900, 250, 0.28, 'sine', 0.14); }
 function playGoalSound() { playTone(220, 1100, 0.55, 'sawtooth', 0.28); }
 function playBuzzerSound() {
   playTone(430, 410, 0.3, 'square', 0.25);
@@ -234,21 +238,23 @@ window.addEventListener('keydown', e => {
 
   if (gameState === 'playing') {
     // Player 1 — always active
-    if (key === 'j') { e.preventDefault(); doKick(player, 'low'); }
-    if (key === 'k') { e.preventDefault(); doKick(player, 'high'); }
-    if (key === 'l') { e.preventDefault(); doSpecial(player); }
+    if (key === 'c') { e.preventDefault(); doKick(player, 'low'); }
+    if (key === 'v') { e.preventDefault(); doKick(player, 'high'); }
 
     // Player 2 — only responds to human input in 2P mode
     if (gameMode === '2p') {
-      if (key === 'n') { e.preventDefault(); doKick(opponent, 'low'); }
-      if (key === 'm') { e.preventDefault(); doKick(opponent, 'high'); }
-      if (key === ',') { e.preventDefault(); doSpecial(opponent); }
+      if (key === 'o') { e.preventDefault(); doKick(opponent, 'low'); }
+      if (key === 'p') { e.preventDefault(); doKick(opponent, 'high'); }
     }
   }
 
   if (key === 'r' && gameState === 'fulltime') {
     e.preventDefault();
     startMatch();
+  }
+  if (key === 'm' && gameState === 'fulltime') {
+    e.preventDefault();
+    goToMenu();
   }
 });
 window.addEventListener('keyup', e => {
@@ -289,13 +295,15 @@ function makePlayer(config) {
     x: 0, h: 0, vx: 0, vh: 0,
     grounded: true, knockX: 0,
     radius: PLAYER_RADIUS,
+    baseRadius: PLAYER_RADIUS,
     shotCooldown: 0,
     kickTimer: 0,
     kickType: null,
     kickHasHit: false,
-    specialCooldown: 0,
-    specialTimer: 0,
-    specialHasHit: false,
+    // Star-powerup status effects
+    frozenTimer: 0,
+    speedBoostTimer: 0,
+    giantTimer: 0,
   }, config);
 }
 
@@ -335,8 +343,6 @@ const ball = {
   radius: 11,
   color: '#fff8dc',
   dark: '#c9a86a',
-  trail: [],
-  fireTrailTimer: 0,
   squeezeCooldown: 0
 };
 
@@ -379,8 +385,8 @@ const KICK_ACTIVE_START = 0.2;
 const KICK_ACTIVE_END = 0.85;
 const LOW_SHOT_SPEED = 520;
 const LOW_SHOT_LIFT = 95;
-const HIGH_SHOT_SPEED = 330;
-const HIGH_SHOT_LIFT = 520;
+const HIGH_SHOT_SPEED = 250;
+const HIGH_SHOT_LIFT = 700;
 
 // ---- Anti-Jamming "Squeeze Force" ----
 // If the ball is wedged near the ground between BOTH players' boot
@@ -391,13 +397,35 @@ const SQUEEZE_GROUND_H = 34;
 const SQUEEZE_POP_VELOCITY = 560;
 const SQUEEZE_COOLDOWN_SECONDS = 0.45;
 
-// ---- Super Bicycle Kick (special ability) ----
-const SPECIAL_COOLDOWN_SECONDS = 30;
-const SPECIAL_DURATION = 0.7;
-const SPECIAL_ACTIVE_START = 0.15;
-const SPECIAL_ACTIVE_END = 0.9;
-const SPECIAL_HITBOX_RADIUS = HEAD_COLLISION_RADIUS * 1.15;
-const SPECIAL_HIT_SPEED_MULT = 2;
+// ---- Random Star Powerups ----
+// A star spawns every STAR_SPAWN_INTERVAL seconds, either near the
+// middle of the pitch or somewhere random up high. Whoever last
+// touched the ball when it collides with the star gets a random
+// effect from POWERUP_TYPES.
+const STAR_SPAWN_INTERVAL = 10;
+const STAR_RADIUS = 15;
+
+const POWERUP_TYPES = ['tallGoal', 'freeze', 'speed', 'giant'];
+const POWERUP_COLORS = { tallGoal: '#4dff88', freeze: '#7fd8ff', speed: '#ffd600', giant: '#ff8a3d' };
+const POWERUP_LABELS = { tallGoal: 'GOAL+', freeze: 'FREEZE', speed: 'SPEED', giant: 'GIANT' };
+
+const GOAL_BOOST_DURATION = 10;
+const GOAL_BOOST_AMOUNT = 70;
+const FREEZE_DURATION = 3.5;
+const SPEED_BOOST_DURATION = 8;
+const SPEED_BOOST_MULT = 1.65;
+const GIANT_DURATION = 10;
+const GIANT_SCALE = 1.7;
+
+let star = null; // { x, h, type }
+let starSpawnTimer = STAR_SPAWN_INTERVAL;
+let lastBallToucher = null; // whoever last kicked/touched the ball
+let starNextSide = Math.random() < 0.5 ? 'left' : 'right'; // alternates so spawn side stays fair
+
+let leftGoalHeight = GOAL_HEIGHT;
+let rightGoalHeight = GOAL_HEIGHT;
+let leftGoalBoostTimer = 0;
+let rightGoalBoostTimer = 0;
 
 /* ---------------------------------------------------------------------
    CONTROL SCHEMES
@@ -441,6 +469,21 @@ function update(dt) {
     return;
   }
 
+  starSpawnTimer -= dt;
+  if (starSpawnTimer <= 0) {
+    spawnStar();
+    starSpawnTimer = STAR_SPAWN_INTERVAL;
+  }
+
+  if (leftGoalBoostTimer > 0) {
+    leftGoalBoostTimer -= dt;
+    if (leftGoalBoostTimer <= 0) { leftGoalBoostTimer = 0; leftGoalHeight = GOAL_HEIGHT; }
+  }
+  if (rightGoalBoostTimer > 0) {
+    rightGoalBoostTimer -= dt;
+    if (rightGoalBoostTimer <= 0) { rightGoalBoostTimer = 0; rightGoalHeight = GOAL_HEIGHT; }
+  }
+
   if (gameMode === '2p') {
     moveHuman(player, CONTROLS_P1_DUO, dt);
     moveHuman(opponent, CONTROLS_P2_DUO, dt);
@@ -451,13 +494,7 @@ function update(dt) {
 
   simulateBallSubsteps(dt);
 
-  if (ball.fireTrailTimer > 0) {
-    ball.fireTrailTimer -= dt;
-    ball.trail.push({ x: ball.x, h: ball.h });
-    if (ball.trail.length > 8) ball.trail.shift();
-  } else if (ball.trail.length) {
-    ball.trail.shift();
-  }
+  if (star) checkStarPickup();
 
   handleBodyCollision(player, opponent);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
@@ -493,8 +530,6 @@ function simulateBallSubsteps(dt) {
     resolveBallWalls();
     updateKickHits(player);
     updateKickHits(opponent);
-    updateSpecialHits(player);
-    updateSpecialHits(opponent);
     resolveBallWalls();
     checkSqueezeForce(subDt);
     if (handleGoals()) return;
@@ -502,13 +537,23 @@ function simulateBallSubsteps(dt) {
 }
 
 function moveHuman(entity, controls, dt) {
-  updateShotTimers(entity, dt);
+  updateEntityTimers(entity, dt);
 
+  if (entity.frozenTimer > 0) {
+    entity.vx = moveToward(entity.vx, 0, MOVE_DECEL * dt);
+    entity.x += entity.vx * dt;
+    applyGravity(entity, dt);
+    applyKnockback(entity, dt);
+    entity.x = clamp(entity.x, GOAL_X_LEFT + entity.radius, GOAL_X_RIGHT - entity.radius);
+    return;
+  }
+
+  const effSpeed = entity.speed * (entity.speedBoostTimer > 0 ? SPEED_BOOST_MULT : 1);
   let dir = 0;
   if (controls.left.some(k => keys[k])) dir -= 1;
   if (controls.right.some(k => keys[k])) dir += 1;
 
-  const targetVx = dir * entity.speed;
+  const targetVx = dir * effSpeed;
   const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
   entity.vx = moveToward(entity.vx, targetVx, accel * dt);
   entity.x += entity.vx * dt;
@@ -525,7 +570,18 @@ function moveHuman(entity, controls, dt) {
 }
 
 function updateOpponentAI(dt) {
-  updateShotTimers(opponent, dt);
+  updateEntityTimers(opponent, dt);
+
+  if (opponent.frozenTimer > 0) {
+    opponent.vx = moveToward(opponent.vx, 0, MOVE_DECEL * dt);
+    opponent.x += opponent.vx * dt;
+    applyGravity(opponent, dt);
+    applyKnockback(opponent, dt);
+    opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
+    return;
+  }
+
+  const effSpeed = opponent.speed * (opponent.speedBoostTimer > 0 ? SPEED_BOOST_MULT : 1);
 
   const toBallX = ball.x - opponent.x;
   let desiredDir = 0;
@@ -540,7 +596,7 @@ function updateOpponentAI(dt) {
   }
 
   const steer = clamp(desiredDir + sepDir * 1.3, -1, 1);
-  const targetVx = steer * opponent.speed;
+  const targetVx = steer * effSpeed;
   const accel = Math.abs(steer) > 0.05 ? MOVE_ACCEL : MOVE_DECEL;
   opponent.vx = moveToward(opponent.vx, targetVx, accel * dt);
   opponent.x += opponent.vx * dt;
@@ -556,13 +612,6 @@ function updateOpponentAI(dt) {
   if (dist < SHOOT_RANGE) {
     const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
     doKick(opponent, shotType);
-  }
-
-  // The AI occasionally busts out its own Super Bicycle Kick when the
-  // ball is nearby and the cooldown is ready.
-  if (opponent.specialCooldown <= 0 && opponent.specialTimer <= 0 &&
-      Math.abs(ball.x - opponent.x) < 160 && Math.random() < 0.004) {
-    doSpecial(opponent);
   }
 
   applyGravity(opponent, dt);
@@ -622,16 +671,15 @@ function resolveBallWalls() {
     if (ball.vh > 0) ball.vh = -Math.abs(ball.vh) * 0.5;
   }
 
-  const inGoalOpening = ball.h < GOAL_HEIGHT;
-  if (!inGoalOpening) {
-    if (ball.x - ball.radius < GOAL_X_LEFT) {
-      ball.x = GOAL_X_LEFT + ball.radius;
-      ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
-    }
-    if (ball.x + ball.radius > GOAL_X_RIGHT) {
-      ball.x = GOAL_X_RIGHT - ball.radius;
-      ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
-    }
+  const inLeftGoalOpening = ball.h < leftGoalHeight;
+  if (!inLeftGoalOpening && ball.x - ball.radius < GOAL_X_LEFT) {
+    ball.x = GOAL_X_LEFT + ball.radius;
+    ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
+  }
+  const inRightGoalOpening = ball.h < rightGoalHeight;
+  if (!inRightGoalOpening && ball.x + ball.radius > GOAL_X_RIGHT) {
+    ball.x = GOAL_X_RIGHT - ball.radius;
+    ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
   }
 
   const speed = Math.hypot(ball.vx, ball.vh);
@@ -693,16 +741,17 @@ function capsuleOverlap(x1, h1, x2, h2, cR, kickPower) {
 }
 
 function resolveDeepestContact(entity) {
+  const scale = entity.radius / PLAYER_RADIUS; // grows with the giant powerup
   const dir = entity.attackDir;
-  const heelX = entity.x - dir * BOOT_HEEL_X_OFFSET;
-  const heelH = entity.h + BOOT_HEEL_H_OFFSET;
-  const toeX = entity.x + dir * BOOT_TOE_X_OFFSET;
-  const toeH = entity.h + BOOT_TOE_H_OFFSET;
+  const heelX = entity.x - dir * BOOT_HEEL_X_OFFSET * scale;
+  const heelH = entity.h + BOOT_HEEL_H_OFFSET * scale;
+  const toeX = entity.x + dir * BOOT_TOE_X_OFFSET * scale;
+  const toeH = entity.h + BOOT_TOE_H_OFFSET * scale;
 
   const candidates = [
-    pointOverlap(entity.x, entity.h + HEAD_OFFSET, HEAD_COLLISION_RADIUS, 1.1),
-    capsuleOverlap(heelX, heelH, toeX, toeH, BOOT_COLLISION_RADIUS, 1.25),
-    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET, entity.x, entity.h + HEAD_OFFSET, BODY_RADIUS, 1.15)
+    pointOverlap(entity.x, entity.h + HEAD_OFFSET * scale, HEAD_COLLISION_RADIUS * scale, 1.1),
+    capsuleOverlap(heelX, heelH, toeX, toeH, BOOT_COLLISION_RADIUS * scale, 1.25),
+    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET * scale, entity.x, entity.h + HEAD_OFFSET * scale, BODY_RADIUS * scale, 1.15)
   ];
 
   let best = null;
@@ -721,6 +770,7 @@ function resolveDeepestContact(entity) {
 
   ball.vx = reflectedVx * BALL_COLLISION_RESTITUTION + best.nx * entitySpeed * best.kickPower + entity.vx * 0.35;
   ball.vh = reflectedVh * BALL_COLLISION_RESTITUTION + best.nh * entitySpeed * best.kickPower + entity.vh * 0.35;
+  lastBallToucher = entity;
   return true;
 }
 
@@ -737,7 +787,7 @@ function handleEntityBallCollision(entity) {
    KICKS — decoupled from ball contact.
    --------------------------------------------------------------------- */
 function doKick(entity, type) {
-  if (entity.shotCooldown > 0) return false;
+  if (entity.shotCooldown > 0 || entity.frozenTimer > 0) return false;
   entity.kickTimer = KICK_ANIM_DURATION;
   entity.kickType = type;
   entity.kickHasHit = false;
@@ -746,6 +796,7 @@ function doKick(entity, type) {
 }
 
 function kickSweepPoint(entity) {
+  const scale = entity.radius / PLAYER_RADIUS;
   const w = entity.radius * 3.1;
   const h = entity.radius * 1.9;
   const progress = 1 - entity.kickTimer / KICK_ANIM_DURATION;
@@ -754,15 +805,15 @@ function kickSweepPoint(entity) {
   if (entity.kickType === 'low') {
     return {
       x: entity.x + entity.attackDir * (w * 0.5 + swing * w * 0.55),
-      h: entity.h + BOOT_OFFSET + swing * h * 0.2,
-      r: BOOT_COLLISION_RADIUS * 1.35,
+      h: entity.h + BOOT_OFFSET * scale + swing * h * 0.2,
+      r: BOOT_COLLISION_RADIUS * 1.35 * scale,
       progress
     };
   }
   return {
     x: entity.x + entity.attackDir * (w * 0.35 + swing * w * 0.4),
-    h: entity.h + BOOT_OFFSET + swing * h * 1.7,
-    r: BOOT_COLLISION_RADIUS * 1.35,
+    h: entity.h + BOOT_OFFSET * scale + swing * h * 1.7,
+    r: BOOT_COLLISION_RADIUS * 1.35 * scale,
     progress
   };
 }
@@ -782,45 +833,83 @@ function updateKickHits(entity) {
   ball.vx = entity.attackDir * speed + entity.vx * 0.25;
   ball.vh = lift + entity.vh * 0.25;
   entity.kickHasHit = true;
+  lastBallToucher = entity;
   playKickSound();
 }
 
-/* ---------------------------------------------------------------------
-   SUPER BICYCLE KICK — special ability
-   --------------------------------------------------------------------- */
-function doSpecial(entity) {
-  if (entity.specialCooldown > 0 || entity.specialTimer > 0) return false;
-  entity.specialTimer = SPECIAL_DURATION;
-  entity.specialCooldown = SPECIAL_COOLDOWN_SECONDS;
-  entity.specialHasHit = false;
-  entity.vh = Math.max(entity.vh, JUMP_VELOCITY * 0.85);
-  entity.vx += entity.attackDir * 140;
-  playSpecialWhooshSound();
-  return true;
-}
-
-function updateSpecialHits(entity) {
-  if (entity.specialTimer <= 0 || entity.specialHasHit) return;
-
-  const progress = 1 - entity.specialTimer / SPECIAL_DURATION;
-  if (progress < SPECIAL_ACTIVE_START || progress > SPECIAL_ACTIVE_END) return;
-
-  const cx = entity.x, cH = entity.h + HEAD_OFFSET * 0.5;
-  const dist = Math.hypot(ball.x - cx, ball.h - cH);
-  if (dist > SPECIAL_HITBOX_RADIUS + ball.radius) return;
-
-  ball.vx = entity.attackDir * HIGH_SHOT_SPEED * SPECIAL_HIT_SPEED_MULT + entity.vx * 0.2;
-  ball.vh = HIGH_SHOT_LIFT * 1.15 + Math.abs(entity.vh) * 0.2;
-  entity.specialHasHit = true;
-  ball.fireTrailTimer = 0.8;
-  playSpecialImpactSound();
-}
-
-function updateShotTimers(entity, dt) {
+function updateEntityTimers(entity, dt) {
   entity.shotCooldown = Math.max(0, entity.shotCooldown - dt);
   entity.kickTimer = Math.max(0, entity.kickTimer - dt);
-  entity.specialCooldown = Math.max(0, entity.specialCooldown - dt);
-  entity.specialTimer = Math.max(0, entity.specialTimer - dt);
+  entity.frozenTimer = Math.max(0, entity.frozenTimer - dt);
+  entity.speedBoostTimer = Math.max(0, entity.speedBoostTimer - dt);
+  if (entity.giantTimer > 0) {
+    entity.giantTimer = Math.max(0, entity.giantTimer - dt);
+    if (entity.giantTimer <= 0) entity.radius = entity.baseRadius;
+  }
+}
+
+/* ---------------------------------------------------------------------
+   RANDOM STAR POWERUPS
+   --------------------------------------------------------------------- */
+function spawnStar() {
+  const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
+
+  // Alternate which half of the pitch the star lands on each spawn,
+  // so neither player consistently gets an easier star to reach.
+  const side = starNextSide;
+  starNextSide = side === 'left' ? 'right' : 'left';
+
+  const pitchMid = CANVAS_W / 2;
+  const halfGap = 20; // small buffer either side of the halfway line
+  let x, h;
+  if (Math.random() < 0.4) {
+    // Near mid-pitch, nudged toward the assigned side
+    x = pitchMid + (side === 'left' ? -1 : 1) * (halfGap + Math.random() * 60);
+    h = 150 + Math.random() * 60;
+  } else {
+    // Somewhere random, high up, but confined to the assigned half
+    const minX = side === 'left' ? GOAL_X_LEFT + 110 : pitchMid + halfGap;
+    const maxX = side === 'left' ? pitchMid - halfGap : GOAL_X_RIGHT - 110;
+    x = minX + Math.random() * Math.max(10, maxX - minX);
+    h = 160 + Math.random() * Math.max(20, CEILING_H - 180);
+  }
+  star = { x, h, type };
+}
+
+function checkStarPickup() {
+  const dist = Math.hypot(ball.x - star.x, ball.h - star.h);
+  if (dist > STAR_RADIUS + ball.radius) return;
+
+  if (lastBallToucher) applyPowerup(star.type, lastBallToucher);
+  star = null;
+  playPowerupSound();
+}
+
+function applyPowerup(type, entity) {
+  const other = entity === player ? opponent : player;
+  switch (type) {
+    case 'tallGoal':
+      // Boosts the height of the goal this player is shooting AT.
+      if (entity.attackDir === 1) {
+        rightGoalHeight = GOAL_HEIGHT + GOAL_BOOST_AMOUNT;
+        rightGoalBoostTimer = GOAL_BOOST_DURATION;
+      } else {
+        leftGoalHeight = GOAL_HEIGHT + GOAL_BOOST_AMOUNT;
+        leftGoalBoostTimer = GOAL_BOOST_DURATION;
+      }
+      break;
+    case 'freeze':
+      other.frozenTimer = FREEZE_DURATION;
+      other.vx = 0;
+      break;
+    case 'speed':
+      entity.speedBoostTimer = SPEED_BOOST_DURATION;
+      break;
+    case 'giant':
+      entity.giantTimer = GIANT_DURATION;
+      entity.radius = entity.baseRadius * GIANT_SCALE;
+      break;
+  }
 }
 
 function handleBodyCollision(a, b) {
@@ -868,7 +957,7 @@ function triggerGoal(concedingSide) {
   pendingConcedingSide = concedingSide;
 }
 
-function resetEntityForKickoff(entity, x, fullReset) {
+function resetEntityForKickoff(entity, x) {
   entity.x = x;
   entity.h = 0;
   entity.vx = 0;
@@ -879,9 +968,26 @@ function resetEntityForKickoff(entity, x, fullReset) {
   entity.kickTimer = 0;
   entity.kickType = null;
   entity.kickHasHit = false;
-  entity.specialTimer = 0;
-  entity.specialHasHit = false;
-  if (fullReset) entity.specialCooldown = 0;
+  entity.frozenTimer = 0;
+  entity.speedBoostTimer = 0;
+  entity.giantTimer = 0;
+  entity.radius = entity.baseRadius;
+}
+
+function resetPitchPowerups(preserveStar) {
+  // On a goal reset we keep any star that was already out on the pitch —
+  // and let its countdown keep running from where it left off — so a
+  // goal doesn't rob a star that was already spawned for that window.
+  // On a full match reset (new match / back to menu) the star always clears.
+  if (!preserveStar) {
+    star = null;
+    starSpawnTimer = STAR_SPAWN_INTERVAL;
+  }
+  lastBallToucher = null;
+  leftGoalHeight = GOAL_HEIGHT;
+  rightGoalHeight = GOAL_HEIGHT;
+  leftGoalBoostTimer = 0;
+  rightGoalBoostTimer = 0;
 }
 
 const CONCESSION_BIAS = 110;
@@ -892,12 +998,11 @@ function resetAfterGoal(concedingSide) {
   ball.h = 190;
   ball.vx = 0;
   ball.vh = 0;
-  ball.trail = [];
-  ball.fireTrailTimer = 0;
   ball.squeezeCooldown = 0;
 
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140, false);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140, false);
+  resetPitchPowerups(true); // keep any star still on the pitch through kickoff
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
 }
 
 function startMatch() {
@@ -912,12 +1017,31 @@ function startMatch() {
   ball.h = 220;
   ball.vx = 0;
   ball.vh = 0;
-  ball.trail = [];
-  ball.fireTrailTimer = 0;
   ball.squeezeCooldown = 0;
 
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140, true);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140, true);
+  starNextSide = Math.random() < 0.5 ? 'left' : 'right';
+  resetPitchPowerups();
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
+}
+
+function goToMenu() {
+  scoreLeft = 0;
+  scoreRight = 0;
+  matchTime = 60;
+  gameMode = null;
+  gameState = 'menu';
+  menuHover = null;
+
+  ball.x = CANVAS_W / 2;
+  ball.h = 220;
+  ball.vx = 0;
+  ball.vh = 0;
+  ball.squeezeCooldown = 0;
+
+  resetPitchPowerups();
+  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
+  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
 }
 
 /* ---------------------------------------------------------------------
@@ -929,6 +1053,7 @@ function render() {
   drawPitch();
   drawGoal(true);
   drawGoal(false);
+  drawStar();
   drawEntitiesSorted();
   drawScoreboard();
 
@@ -1008,7 +1133,9 @@ function drawGoal(isLeft) {
   const backX = isLeft ? GOAL_X_LEFT - GOAL_NET_DEPTH : GOAL_X_RIGHT + GOAL_NET_DEPTH;
   const leftX = Math.min(frontX, backX);
   const rightX = Math.max(frontX, backX);
-  const topY = GROUND_Y - GOAL_HEIGHT;
+  const goalH = isLeft ? leftGoalHeight : rightGoalHeight;
+  const boosted = goalH > GOAL_HEIGHT;
+  const topY = GROUND_Y - goalH;
 
   ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 1;
@@ -1026,8 +1153,8 @@ function drawGoal(isLeft) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = '#eafaf0';
-  ctx.lineWidth = 4;
+  ctx.strokeStyle = boosted ? '#ffd600' : '#eafaf0';
+  ctx.lineWidth = boosted ? 5 : 4;
   ctx.lineCap = 'round';
 
   ctx.beginPath();
@@ -1081,19 +1208,57 @@ function drawGroundShadow(x, h, baseRadius) {
   ctx.fill();
 }
 
-function drawBallTrail() {
-  if (!ball.trail || ball.trail.length === 0) return;
-  ball.trail.forEach((p, i) => {
-    const t = (i + 1) / ball.trail.length;
-    ctx.beginPath();
-    ctx.arc(p.x, groundToScreenY(p.h), ball.radius * (0.4 + 0.5 * t), 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(255,${120 + Math.floor(80 * t)},20,${0.45 * t})`;
-    ctx.fill();
-  });
+function drawStar() {
+  if (!star) return;
+  const sy = groundToScreenY(star.h);
+  const t = performance.now() / 250;
+  const bob = Math.sin(t) * 4;
+  const pulse = 0.85 + 0.15 * Math.sin(t * 1.6);
+
+  ctx.save();
+  ctx.translate(star.x, sy + bob);
+
+  ctx.beginPath();
+  ctx.arc(0, 0, STAR_RADIUS * 1.7 * pulse, 0, Math.PI * 2);
+  ctx.fillStyle = POWERUP_COLORS[star.type] + '33';
+  ctx.fill();
+
+  drawStarShape(0, 0, STAR_RADIUS, POWERUP_COLORS[star.type]);
+
+  ctx.fillStyle = '#0b1015';
+  ctx.font = 'bold 9px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 3;
+  ctx.strokeText(POWERUP_LABELS[star.type], 0, STAR_RADIUS + 13);
+  ctx.fillText(POWERUP_LABELS[star.type], 0, STAR_RADIUS + 13);
+  ctx.textAlign = 'start';
+
+  ctx.restore();
+}
+
+function drawStarShape(cx, cy, r, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const outerAngle = -Math.PI / 2 + i * (Math.PI * 2 / 5);
+    const innerAngle = outerAngle + Math.PI / 5;
+    const ox = Math.cos(outerAngle) * r, oy = Math.sin(outerAngle) * r;
+    const ix = Math.cos(innerAngle) * r * 0.45, iy = Math.sin(innerAngle) * r * 0.45;
+    if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
+    ctx.lineTo(ix, iy);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawBall(entity) {
-  drawBallTrail();
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
   const screenY = groundToScreenY(entity.h);
   ctx.beginPath();
@@ -1117,47 +1282,47 @@ function drawBall(entity) {
 function drawCharacter(entity) {
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
 
+  const scale = entity.radius / PLAYER_RADIUS;
   const baseY = groundToScreenY(entity.h);
-  const bootY = baseY - BOOT_OFFSET;
-  const headY = baseY - HEAD_OFFSET;
+  const bootY = baseY - BOOT_OFFSET * scale;
+  const headY = baseY - HEAD_OFFSET * scale;
 
-  if (entity.specialTimer > 0) {
-    const progress = 1 - entity.specialTimer / SPECIAL_DURATION;
-    const pivotY = baseY - HEAD_OFFSET * 0.55;
+  drawBoot(entity.x, bootY, entity);
+  drawTorso(entity.x, bootY, headY, entity);
+  drawHead(entity.x, headY, entity);
+  drawEntityEffects(entity, headY);
+}
 
-    // Fiery motion-trail afterimages behind the flip
-    for (let i = 3; i >= 1; i--) {
-      const backProgress = Math.max(0, progress - i * 0.06);
-      const backAngle = backProgress * Math.PI * 2 * entity.attackDir;
-      ctx.save();
-      ctx.globalAlpha = 0.09 * i;
-      ctx.translate(entity.x, pivotY);
-      ctx.rotate(backAngle);
-      ctx.translate(-entity.x, -pivotY);
-      drawBoot(entity.x, bootY, entity);
-      drawTorso(entity.x, bootY, headY, entity);
-      drawHead(entity.x, headY, entity);
-      ctx.restore();
-    }
-
-    const angle = progress * Math.PI * 2 * entity.attackDir;
+function drawEntityEffects(entity, headY) {
+  if (entity.frozenTimer > 0) {
     ctx.save();
-    ctx.translate(entity.x, pivotY);
-    ctx.rotate(angle);
-    ctx.translate(-entity.x, -pivotY);
-    drawBoot(entity.x, bootY, entity);
-    drawTorso(entity.x, bootY, headY, entity);
-    drawHead(entity.x, headY, entity);
+    ctx.globalAlpha = 0.3;
+    ctx.beginPath();
+    ctx.arc(entity.x, headY, entity.radius * 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#bfe9ff';
+    ctx.fill();
     ctx.restore();
-  } else {
-    drawBoot(entity.x, bootY, entity);
-    drawTorso(entity.x, bootY, headY, entity);
-    drawHead(entity.x, headY, entity);
   }
+
+  const icons = [];
+  if (entity.frozenTimer > 0) icons.push('❄');
+  if (entity.speedBoostTimer > 0) icons.push('⚡');
+  if (entity.giantTimer > 0) icons.push('⬆');
+  if (!icons.length) return;
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 14px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(icons.join(' '), entity.x, headY - entity.radius * 2.5);
+  ctx.restore();
 }
 
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
-  const width = BODY_RADIUS * 1.7;
+  const scale = entity.radius / PLAYER_RADIUS;
+  const width = BODY_RADIUS * 1.7 * scale;
   const top = headScreenY + entity.radius * 0.9;
   const bottom = bootScreenY - entity.radius * 0.15;
 
@@ -1404,9 +1569,6 @@ function drawScoreboard() {
   drawScoreChip(18, '#1c3a5c', '#3fa7ff', 'BLUE', scoreLeft, 'left');
   drawScoreChip(CANVAS_W - 18, '#5c1c1c', '#ff5b5b', 'RED', scoreRight, 'right');
 
-  drawSpecialBadge(196, HUD_HEIGHT / 2, player, '#3fa7ff', 'L');
-  drawSpecialBadge(CANVAS_W - 196, HUD_HEIGHT / 2, opponent, '#ff5b5b', gameMode === '2p' ? ',' : 'AI');
-
   const timeLeft = Math.max(0, Math.ceil(matchTime));
   const mm = Math.floor(timeLeft / 60);
   const ss = String(timeLeft % 60).padStart(2, '0');
@@ -1438,37 +1600,6 @@ function drawScoreChip(edgeX, panelColor, accent, label, score, side) {
   ctx.textAlign = side === 'left' ? 'end' : 'start';
   ctx.fillText(String(score), side === 'left' ? x + w - 14 : x + 14, y + h / 2 + 7);
   ctx.textAlign = 'start';
-}
-
-function drawSpecialBadge(x, y, entity, accentColor, keyLabel) {
-  const r = 15;
-  const ready = entity.specialCooldown <= 0 && entity.specialTimer <= 0;
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = ready ? '#ffd600' : 'rgba(255,255,255,0.25)';
-  ctx.stroke();
-
-  if (entity.specialCooldown > 0) {
-    const frac = entity.specialCooldown / SPECIAL_COOLDOWN_SECONDS;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.arc(x, y, r - 3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
-    ctx.closePath();
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.fill();
-  }
-
-  ctx.fillStyle = ready ? '#ffd600' : accentColor;
-  ctx.font = 'bold 12px Segoe UI, Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(keyLabel, x, y + 4);
-  ctx.textAlign = 'start';
-  ctx.restore();
 }
 
 function drawCountdownOverlay() {
@@ -1593,9 +1724,11 @@ function drawFullTimeOverlay() {
   ctx.fillStyle = '#eafaf0';
   ctx.fillText(resultText, cx, cy + 12);
 
-  ctx.font = '16px Segoe UI, Arial, sans-serif';
-  ctx.fillStyle = '#9fcbb0';
-  ctx.fillText('Press R to restart', cx, cy + 44);
+  ctx.font = 'bold 16px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#8fffb0';
+  ctx.fillText('Press R to Rematch', cx, cy + 46);
+  ctx.fillStyle = '#ffd600';
+  ctx.fillText('Press M for Main Menu', cx, cy + 70);
   ctx.textAlign = 'start';
 }
 
@@ -1635,8 +1768,10 @@ function drawMenuOverlay() {
 
   ctx.fillStyle = '#9fcbb0';
   ctx.font = '12px Segoe UI, Arial, sans-serif';
-  ctx.fillText('P1: WASD move · J/K shoot · L special', CANVAS_W / 2, 300);
-  ctx.fillText('P2 (2P mode): Arrows move · N/M shoot · , special', CANVAS_W / 2, 320);
+  ctx.fillText('P1: WASD move · C/V shoot', CANVAS_W / 2, 300);
+  ctx.fillText('P2 (2P mode): Arrows move · O/P shoot', CANVAS_W / 2, 320);
+  ctx.fillStyle = '#ffd600';
+  ctx.fillText('★ Grab the star every 10s for a random powerup!', CANVAS_W / 2, 342);
   ctx.textAlign = 'start';
 }
 
