@@ -2,10 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Head Soccer Arcade — v9</title>
+<title>Head Soccer — v6 (arcade match)</title>
 <style>
-  * { box-sizing: border-box; }
   body {
     margin: 0;
     min-height: 100vh;
@@ -13,202 +11,140 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: radial-gradient(ellipse at center, #182028 0%, #05070a 100%);
+    background: radial-gradient(ellipse at center, #1a3326 0%, #0a1810 100%);
     font-family: 'Segoe UI', Arial, sans-serif;
     color: #eafaf0;
-    padding: 12px 0;
   }
 
   h1 {
-    margin: 4px 0 10px;
-    font-size: 20px;
+    margin: 12px 0 8px;
+    font-size: 22px;
     letter-spacing: 1px;
-    text-shadow: 0 2px 6px rgba(0,0,0,0.6);
   }
+
+  /* Scoreboard */
+  #hud {
+    display: flex;
+    align-items: stretch;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 10px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .score-block {
+    padding: 8px 22px;
+    font-weight: 800;
+    font-size: 15px;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+  }
+  .score-block.blue { background: linear-gradient(160deg, #3fa7ff, #1a4a7a); }
+  .score-block.red  { background: linear-gradient(160deg, #ff5b5b, #7a1a1a); }
+  .score-num { font-size: 24px; }
 
   #instructions {
-    margin-top: 10px;
+    margin-top: 8px;
     font-size: 13px;
     color: #9fcbb0;
-    max-width: 780px;
+    max-width: 720px;
     text-align: center;
-    padding: 0 12px;
-    line-height: 1.5;
   }
 
-  #instructions strong { color: #eafaf0; }
-
-  /* Fixed-aspect arcade viewport — wide "mobile landscape" framing */
   #arcade-frame {
-    padding: 10px;
+    padding: 14px;
     background: linear-gradient(155deg, #2b2b2b, #0f0f0f);
-    border-radius: 18px;
+    border-radius: 16px;
     box-shadow:
       0 0 0 2px rgba(255,255,255,0.06),
       0 16px 40px rgba(0,0,0,0.55),
       inset 0 1px 0 rgba(255,255,255,0.08);
-    width: min(96vw, 940px);
   }
 
   canvas {
     display: block;
-    width: 100%;
-    height: auto;
-    aspect-ratio: 900 / 400;
-    background: #05130c;
-    border-radius: 8px;
+    width: 1000px;
+    height: 480px;
+    background: #0d2a1c;
+    border-radius: 6px;
     box-shadow: inset 0 0 24px rgba(0,0,0,0.6);
-    cursor: pointer;
   }
 </style>
 </head>
 <body>
 
-<h1>⚽ Head Soccer Arcade — v9</h1>
+<h1>⚽ Head Soccer — v6</h1>
+<div id="hud">
+  <div class="score-block blue">BLUE <span class="score-num" id="scoreLeft">0</span></div>
+  <div class="score-block red">RED <span class="score-num" id="scoreRight">0</span></div>
+</div>
 
 <div id="arcade-frame">
-  <canvas id="field" width="900" height="400"></canvas>
+  <canvas id="field" width="1000" height="480"></canvas>
 </div>
 
 <div id="instructions">
-  <strong>Click a mode on the Main Menu to kick off.</strong><br>
-  <strong>Player 1:</strong> A/D move · W jump · C low shot · V high shot.
-  <strong>Player 2 (2P mode):</strong> Arrow keys move/jump · O low shot · P high shot.
-  Headers happen automatically — just jump into it. Squeeze the ball between both players and watch it pop skyward.
-  A <strong>★ star</strong> appears every 10 seconds — knock the ball into it to grab a random powerup: a taller goal, freezing your rival, super speed, or turning into a giant.
-  First to lead when the 60-second clock hits zero wins the crown. At full time, press <strong>R</strong> to rematch the same mode, or <strong>M</strong> to return to the Main Menu and switch modes.
+  <strong>Click the field once to give it keyboard focus.</strong>
+  A/D or Left/Right to move. W, Up, or Space to jump. J = low kick,
+  K = high kick — both swing instantly on press. First to lead when the
+  60-second clock runs out wins. Press R to play again after full time.
 </div>
 
 <script>
 /* =====================================================================
-   HEAD SOCCER ARCADE — V9
-
-   Rebuilt on top of the v6 arcade engine with:
-     - stylized "Hamza-Eyes" facial rendering (Arabic letter ء motif)
-     - a golden victory crown rendered on the winner at full time
-     - anti-jamming "squeeze force" so the ball can never get pinned
-       flat between two grounded hitboxes — it pops upward instead
-     - a Main Menu with 1P (vs AI) / 2P (couch PvP) mode select
-     - synthesized Web Audio arcade sound effects (kick / goal / buzzer)
-     - a full-time screen with Rematch (R) and Main Menu (M) options
-     - a random star powerup that spawns every 10 seconds near the
-       middle of the pitch or somewhere random up high — whoever last
-       touched the ball when it hits the star gets a random effect:
-       a taller goal, freezing the other player, super speed, or
-       becoming a giant
+   HEAD SOCCER — V6 (ground-up rebuild: proportions, physics, and a
+   real match loop)
    ===================================================================== */
 
 const canvas = document.getElementById('field');
 const ctx = canvas.getContext('2d');
 
-const CANVAS_W = canvas.width;   // 900 — fixed arcade viewport (internal resolution)
-const CANVAS_H = canvas.height;  // 400
+const CANVAS_W = canvas.width;   // 1000 — wide arcade viewport
+const CANVAS_H = canvas.height;  // 480
 
-// ---- HUD strip reserved at the top for the scoreboard/timer/cooldowns ----
-const HUD_HEIGHT = 54;
+// ---- Pitch layout: wide, with short goals and lots of open sky so
+// there's real room to move and defend ----
+const GROUND_Y = 400;
+const GOAL_X_LEFT = 70;
+const GOAL_X_RIGHT = 930;
+const GOAL_HEIGHT = 115;     // short and sleek — nowhere near the top of the screen
+const GOAL_NET_DEPTH = 34;
+const CEILING_H = GROUND_Y - 20;
 
-// ---- The pitch, in plain screen coordinates ----
-const GROUND_Y = 360;
-const GOAL_X_LEFT = 60;
-const GOAL_X_RIGHT = 840;
-const GOAL_HEIGHT = 95;
-const GOAL_NET_DEPTH = 22;
-const CEILING_H = GROUND_Y - HUD_HEIGHT - 15;
-
-function groundToScreenY(h) {
-  return GROUND_Y - h;
-}
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+function groundToScreenY(h) { return GROUND_Y - h; }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function moveToward(current, target, maxDelta) {
   if (Math.abs(target - current) <= maxDelta) return target;
   return current + Math.sign(target - current) * maxDelta;
 }
 
 /* ---------------------------------------------------------------------
-   AUDIO — synthesized arcade SFX via the Web Audio API. No external
-   assets; everything is generated with oscillators + gain envelopes.
-   audioCtx is created lazily on the first user gesture (menu click) to
-   respect autoplay policies.
-   --------------------------------------------------------------------- */
-let audioCtx = null;
-function ensureAudio() {
-  if (!audioCtx) {
-    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-    catch (e) { audioCtx = null; }
-  } else if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
-  }
-}
-
-function playTone(freqStart, freqEnd, duration, type, gainPeak, startDelay) {
-  if (!audioCtx) return;
-  const t = audioCtx.currentTime + (startDelay || 0);
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.type = type;
-  osc.frequency.setValueAtTime(freqStart, t);
-  osc.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), t + duration);
-  gain.gain.setValueAtTime(gainPeak, t);
-  gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.start(t);
-  osc.stop(t + duration + 0.02);
-}
-
-function playKickSound() { playTone(180, 55, 0.11, 'sine', 0.32); }
-function playPowerupSound() {
-  playTone(500, 1200, 0.3, 'triangle', 0.3);
-  playTone(700, 1500, 0.28, 'sine', 0.2, 0.06);
-}
-function playGoalSound() { playTone(220, 1100, 0.55, 'sawtooth', 0.28); }
-function playBuzzerSound() {
-  playTone(430, 410, 0.3, 'square', 0.25);
-  playTone(430, 410, 0.3, 'square', 0.25, 0.35);
-}
-function playMenuSelectSound() { playTone(500, 750, 0.12, 'triangle', 0.25); }
-function playSqueezePopSound() { playTone(140, 480, 0.14, 'sine', 0.22); }
-
-/* ---------------------------------------------------------------------
    MATCH STATE MACHINE
-   'menu' -> 'countdown' -> 'playing' -> 'goal' -> 'playing' -> ... -> 'fulltime'
+   gamePhase moves through: pregame -> playing -> (goalPause -> playing)*
+   -> ended -> (restart) -> pregame
+   Only 'playing' runs full player/AI/collision physics; the others are
+   deliberately restricted so a countdown, a goal celebration, or a
+   finished match can't be interrupted or skipped by input.
    --------------------------------------------------------------------- */
+let gamePhase = 'pregame';
+let phaseTimer = 0;
+let matchTimeRemaining = 0;
+let lastConcedingSide = null; // 'left' | 'right' — who to favor on the next kickoff
+
+const PREGAME_DURATION = 3.6;
+const GOAL_PAUSE_DURATION = 1.4;
+const MATCH_DURATION = 60;
+
 let scoreLeft = 0;
 let scoreRight = 0;
-let matchTime = 60;
-let gameState = 'menu';
-let gameMode = null; // '1p' or '2p'
 
-const COUNTDOWN_PHASES = ['3', '2', '1', 'GO!'];
-const COUNTDOWN_PHASE_DURATION = 0.8;
-let countdownIndex = 0;
-let countdownTimer = COUNTDOWN_PHASE_DURATION;
-
-const GOAL_FREEZE_SECONDS = 1.6;
-let goalTimer = 0;
-let pendingConcedingSide = null; // 'left' or 'right' — whose goal was just scored in
-
-/* ---------------------------------------------------------------------
-   MAIN MENU
-   --------------------------------------------------------------------- */
-const MENU_BTN_W = 260, MENU_BTN_H = 74;
-const menuButtons = [
-  { mode: '1p', label: '1 PLAYER', sub: 'VS COMPUTER AI', x: CANVAS_W / 2 - MENU_BTN_W - 20, y: 168 },
-  { mode: '2p', label: '2 PLAYERS', sub: 'LOCAL COUCH PvP', x: CANVAS_W / 2 + 20, y: 168 }
-];
-let menuHover = null;
-
-function getCanvasCoords(e) {
-  const rect = canvas.getBoundingClientRect();
-  const scaleX = CANVAS_W / rect.width;
-  const scaleY = CANVAS_H / rect.height;
-  return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+function startPregame() {
+  gamePhase = 'pregame';
+  phaseTimer = PREGAME_DURATION;
 }
-function hitTestMenuButtons(x, y) {
-  return menuButtons.find(b => x >= b.x && x <= b.x + MENU_BTN_W && y >= b.y && y <= b.y + MENU_BTN_H) || null;
-}
+startPregame();
 
 /* ---------------------------------------------------------------------
    GAME LOOP
@@ -236,25 +172,13 @@ window.addEventListener('keydown', e => {
   keys[key] = true;
   if (MOVE_KEYS.includes(key)) e.preventDefault();
 
-  if (gameState === 'playing') {
-    // Player 1 — always active
-    if (key === 'c') { e.preventDefault(); doKick(player, 'low'); }
-    if (key === 'v') { e.preventDefault(); doKick(player, 'high'); }
-
-    // Player 2 — only responds to human input in 2P mode
-    if (gameMode === '2p') {
-      if (key === 'o') { e.preventDefault(); doKick(opponent, 'low'); }
-      if (key === 'p') { e.preventDefault(); doKick(opponent, 'high'); }
-    }
+  if (gamePhase === 'playing') {
+    if (key === 'j') { e.preventDefault(); tryShoot(player, 'low'); }
+    if (key === 'k') { e.preventDefault(); tryShoot(player, 'high'); }
   }
-
-  if (key === 'r' && gameState === 'fulltime') {
+  if (key === 'r' && gamePhase === 'ended') {
     e.preventDefault();
-    startMatch();
-  }
-  if (key === 'm' && gameState === 'fulltime') {
-    e.preventDefault();
-    goToMenu();
+    restartMatch();
   }
 });
 window.addEventListener('keyup', e => {
@@ -263,258 +187,114 @@ window.addEventListener('keyup', e => {
 
 canvas.tabIndex = 0;
 canvas.style.outline = 'none';
-canvas.addEventListener('click', (e) => {
-  canvas.focus();
-  if (gameState === 'menu') {
-    const { x, y } = getCanvasCoords(e);
-    const btn = hitTestMenuButtons(x, y);
-    if (btn) {
-      ensureAudio();
-      playMenuSelectSound();
-      gameMode = btn.mode;
-      startMatch();
-    }
-  }
-});
-canvas.addEventListener('mousemove', (e) => {
-  if (gameState !== 'menu') { menuHover = null; return; }
-  const { x, y } = getCanvasCoords(e);
-  const btn = hitTestMenuButtons(x, y);
-  menuHover = btn ? btn.mode : null;
-});
+canvas.addEventListener('click', () => canvas.focus());
 window.addEventListener('load', () => canvas.focus());
 canvas.focus();
 
 /* ---------------------------------------------------------------------
-   ENTITIES
+   ENTITIES — scaled down slightly to fit the wider, more open pitch
    --------------------------------------------------------------------- */
-const PLAYER_RADIUS = 11;
-
-function makePlayer(config) {
-  return Object.assign({
-    x: 0, h: 0, vx: 0, vh: 0,
-    grounded: true, knockX: 0,
-    radius: PLAYER_RADIUS,
-    baseRadius: PLAYER_RADIUS,
-    shotCooldown: 0,
-    kickTimer: 0,
-    kickType: null,
-    kickHasHit: false,
-    // Star-powerup status effects
-    frozenTimer: 0,
-    speedBoostTimer: 0,
-    giantTimer: 0,
-  }, config);
-}
-
-const player = makePlayer({
-  x: GOAL_X_LEFT + 140,
-  speed: 260,
-  attackDir: 1,
-  skin: '#e3a874',
-  hairColor: '#e8b23d',
-  hairStyle: 'spiky',
-  browColor: '#7a5a2a',
-  eyeColor: '#3fae5c',
-  jerseyColor: '#3fa7ff',
-  bootColor: '#152233',
-  bootAccent: '#3fa7ff'
-});
-
-const opponent = makePlayer({
-  x: GOAL_X_RIGHT - 140,
-  speed: 205,
-  attackDir: -1,
-  skin: '#d99a6c',
-  hairColor: '#241a12',
-  hairStyle: 'side',
-  browColor: '#150f0a',
-  eyeColor: '#8a3b3b',
-  jerseyColor: '#ff5b5b',
-  bootColor: '#1a1414',
-  bootAccent: '#ff5b5b'
-});
-
-const ball = {
-  x: CANVAS_W / 2,
-  h: 220,
-  vx: 0,
-  vh: 0,
-  radius: 11,
-  color: '#fff8dc',
-  dark: '#c9a86a',
-  squeezeCooldown: 0
+const player = {
+  x: GOAL_X_LEFT + 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
+  radius: 12, speed: 280, attackDir: 1,
+  shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
+  skin: '#e3a874', hairColor: '#e8b23d', hairStyle: 'spiky', browColor: '#7a5a2a',
+  eyeColor: '#3fae5c', jerseyColor: '#3fa7ff', bootColor: '#152233', bootAccent: '#3fa7ff'
 };
 
-// ---- Tuning constants ----
+const opponent = {
+  x: GOAL_X_RIGHT - 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
+  radius: 12, speed: 225, attackDir: -1,
+  shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
+  skin: '#d99a6c', hairColor: '#241a12', hairStyle: 'side', browColor: '#150f0a',
+  eyeColor: '#8a3b3b', jerseyColor: '#ff5b5b', bootColor: '#1a1414', bootAccent: '#ff5b5b'
+};
 
-const MOVE_ACCEL = 3600;
-const MOVE_DECEL = 4400;
+const ball = {
+  x: CANVAS_W / 2, h: 200, vx: 0, vh: 0, radius: 12, spin: 0,
+};
 
-const GRAVITY_PLAYER_UP = 1400;
-const GRAVITY_PLAYER_DOWN = 2000;
-const JUMP_VELOCITY = 600;
+// ---- Tuning ----
+const MOVE_ACCEL = 3600, MOVE_DECEL = 4400;
+const GRAVITY_PLAYER_UP = 1500, GRAVITY_PLAYER_DOWN = 2150, JUMP_VELOCITY = 650;
 
-const GRAVITY_BALL = 1000;
-const BALL_GROUND_RESTITUTION = 0.86;
+// Ball: high restitution so it NEVER goes dead/flat, with a real speed
+// cap and moderate drag so "always bouncy" doesn't also mean "chaotic".
+const GRAVITY_BALL = 1300;
+const BALL_GROUND_RESTITUTION = 0.8;
 const BALL_WALL_RESTITUTION = 0.68;
 const BALL_COLLISION_RESTITUTION = 0.78;
-const BALL_AIR_DRAG_PER_SECOND = 0.16;
-const BALL_GROUND_FRICTION_PER_SECOND = 0.45;
-const BALL_MIN_BOUNCE_VH = 95;
-const BALL_MAX_SPEED = 900;
+const BALL_AIR_DRAG_PER_SECOND = 0.12;
+const BALL_GROUND_FRICTION_PER_SECOND = 0.4;
+const BALL_SETTLE_THRESHOLD = 6;     // low on purpose — the ball should keep bouncing many times before it's allowed to rest
+const BALL_MAX_SPEED = 820;
 
-// Player hitbox geometry (head / boot / torso capsule)
-const HEAD_COLLISION_RADIUS = 21;
-const BOOT_COLLISION_RADIUS = 13;
-const HEAD_OFFSET = 55;
-const BOOT_OFFSET = 5;
-const BODY_RADIUS = 15;
-
-const BOOT_HEEL_X_OFFSET = 5;
-const BOOT_HEEL_H_OFFSET = BOOT_OFFSET;
-const BOOT_TOE_X_OFFSET = 20;
-const BOOT_TOE_H_OFFSET = BOOT_OFFSET + 11;
+const HEAD_COLLISION_RADIUS = 23;
+const BOOT_COLLISION_RADIUS = 14;
+const HEAD_OFFSET = 60;
+const BOOT_OFFSET = 6;
+const BODY_RADIUS = 16; // closes the head-to-boot gap — see resolveDeepestContact
 
 const KNOCKBACK_FRICTION_PER_SECOND = 0.9;
 
-const SHOOT_RANGE = 70;
+// Shooting — animation ALWAYS plays on a valid keypress; whether it
+// actually connects is decided separately, during the swing's active
+// window (see checkKickImpact).
 const SHOT_COOLDOWN_SECONDS = 0.5;
-const KICK_ANIM_DURATION = 0.22;
-const KICK_ACTIVE_START = 0.2;
-const KICK_ACTIVE_END = 0.85;
-const LOW_SHOT_SPEED = 520;
-const LOW_SHOT_LIFT = 95;
-const HIGH_SHOT_SPEED = 250;
-const HIGH_SHOT_LIFT = 700;
-
-// ---- Anti-Jamming "Squeeze Force" ----
-// If the ball is wedged near the ground between BOTH players' boot
-// hitboxes at once, it gets an automatic upward pop — like soap
-// squeezed out of a fist — instead of getting pinned flat forever.
-const SQUEEZE_RANGE = BOOT_COLLISION_RADIUS + 21;
-const SQUEEZE_GROUND_H = 34;
-const SQUEEZE_POP_VELOCITY = 560;
-const SQUEEZE_COOLDOWN_SECONDS = 0.45;
-
-// ---- Random Star Powerups ----
-// A star spawns every STAR_SPAWN_INTERVAL seconds, either near the
-// middle of the pitch or somewhere random up high. Whoever last
-// touched the ball when it collides with the star gets a random
-// effect from POWERUP_TYPES.
-const STAR_SPAWN_INTERVAL = 10;
-const STAR_RADIUS = 15;
-
-const POWERUP_TYPES = ['tallGoal', 'freeze', 'speed', 'giant'];
-const POWERUP_COLORS = { tallGoal: '#4dff88', freeze: '#7fd8ff', speed: '#ffd600', giant: '#ff8a3d' };
-const POWERUP_LABELS = { tallGoal: 'GOAL+', freeze: 'FREEZE', speed: 'SPEED', giant: 'GIANT' };
-
-const GOAL_BOOST_DURATION = 10;
-const GOAL_BOOST_AMOUNT = 70;
-const FREEZE_DURATION = 3.5;
-const SPEED_BOOST_DURATION = 8;
-const SPEED_BOOST_MULT = 1.65;
-const GIANT_DURATION = 10;
-const GIANT_SCALE = 1.7;
-
-let star = null; // { x, h, type }
-let starSpawnTimer = STAR_SPAWN_INTERVAL;
-let lastBallToucher = null; // whoever last kicked/touched the ball
-let starNextSide = Math.random() < 0.5 ? 'left' : 'right'; // alternates so spawn side stays fair
-
-let leftGoalHeight = GOAL_HEIGHT;
-let rightGoalHeight = GOAL_HEIGHT;
-let leftGoalBoostTimer = 0;
-let rightGoalBoostTimer = 0;
-
-/* ---------------------------------------------------------------------
-   CONTROL SCHEMES
-   --------------------------------------------------------------------- */
-const CONTROLS_P1_SOLO = { left: ['a', 'arrowleft'], right: ['d', 'arrowright'], jump: ['w', 'arrowup', ' '] };
-const CONTROLS_P1_DUO = { left: ['a'], right: ['d'], jump: ['w'] };
-const CONTROLS_P2_DUO = { left: ['arrowleft'], right: ['arrowright'], jump: ['arrowup'] };
+const KICK_ANIM_DURATION = 0.26;
+const KICK_CONNECT_RANGE = 85;
+const AI_KICK_DECISION_RANGE = 95;
+const LOW_SHOT_SPEED = 560, LOW_SHOT_LIFT = 70;
+const HIGH_SHOT_SPEED = 360, HIGH_SHOT_LIFT = 660;
 
 /* ---------------------------------------------------------------------
    UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
-  if (gameState === 'menu') {
-    return; // idle preview behind the menu — no physics
-  }
-
-  if (gameState === 'countdown') {
-    updateCountdown(dt);
-    return;
-  }
-
-  if (gameState === 'goal') {
-    goalTimer -= dt;
-    if (goalTimer <= 0) {
-      resetAfterGoal(pendingConcedingSide);
-      gameState = 'playing';
+  if (gamePhase === 'pregame') {
+    phaseTimer -= dt;
+    moveBall(dt); // let it visibly drop in during the countdown
+    if (phaseTimer <= 0) {
+      gamePhase = 'playing';
+      matchTimeRemaining = MATCH_DURATION;
     }
     return;
   }
 
-  if (gameState === 'fulltime') {
+  if (gamePhase === 'goalPause') {
+    phaseTimer -= dt;
+    if (phaseTimer <= 0) {
+      resetAfterGoal();
+      gamePhase = matchTimeRemaining > 0 ? 'playing' : 'ended';
+    }
     return;
   }
 
-  // ---- 'playing' ----
-  matchTime -= dt;
-  if (matchTime <= 0) {
-    matchTime = 0;
-    gameState = 'fulltime';
-    playBuzzerSound();
+  if (gamePhase === 'ended') {
     return;
   }
 
-  starSpawnTimer -= dt;
-  if (starSpawnTimer <= 0) {
-    spawnStar();
-    starSpawnTimer = STAR_SPAWN_INTERVAL;
+  // gamePhase === 'playing'
+  matchTimeRemaining = Math.max(0, matchTimeRemaining - dt);
+  if (matchTimeRemaining <= 0) {
+    gamePhase = 'ended';
+    return;
   }
 
-  if (leftGoalBoostTimer > 0) {
-    leftGoalBoostTimer -= dt;
-    if (leftGoalBoostTimer <= 0) { leftGoalBoostTimer = 0; leftGoalHeight = GOAL_HEIGHT; }
-  }
-  if (rightGoalBoostTimer > 0) {
-    rightGoalBoostTimer -= dt;
-    if (rightGoalBoostTimer <= 0) { rightGoalBoostTimer = 0; rightGoalHeight = GOAL_HEIGHT; }
-  }
-
-  if (gameMode === '2p') {
-    moveHuman(player, CONTROLS_P1_DUO, dt);
-    moveHuman(opponent, CONTROLS_P2_DUO, dt);
-  } else {
-    moveHuman(player, CONTROLS_P1_SOLO, dt);
-    updateOpponentAI(dt);
-  }
-
+  movePlayer(dt);
+  updateOpponentAI(dt);
   simulateBallSubsteps(dt);
-
-  if (star) checkStarPickup();
 
   handleBodyCollision(player, opponent);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
-function updateCountdown(dt) {
-  countdownTimer -= dt;
-  if (countdownTimer <= 0) {
-    countdownIndex++;
-    if (countdownIndex >= COUNTDOWN_PHASES.length) {
-      gameState = 'playing';
-    } else {
-      countdownTimer = COUNTDOWN_PHASE_DURATION;
-    }
-  }
-}
-
 /* ---------------------------------------------------------------------
-   CONTINUOUS COLLISION DETECTION (adaptive substepping)
+   CONTINUOUS COLLISION (adaptive substepping) — split the ball's motion
+   into pieces no bigger than a boot-radius, and re-check every piece,
+   so a fast ball can't cross an entire player within one gap between
+   checks.
    --------------------------------------------------------------------- */
 function simulateBallSubsteps(dt) {
   const speed = Math.hypot(ball.vx, ball.vh);
@@ -528,60 +308,36 @@ function simulateBallSubsteps(dt) {
     resolveBallWalls();
     handleEntityBallCollision(opponent);
     resolveBallWalls();
-    updateKickHits(player);
-    updateKickHits(opponent);
-    resolveBallWalls();
-    checkSqueezeForce(subDt);
+    checkKickImpact(player);
+    checkKickImpact(opponent);
     if (handleGoals()) return;
   }
 }
 
-function moveHuman(entity, controls, dt) {
-  updateEntityTimers(entity, dt);
+function movePlayer(dt) {
+  updateShotTimers(player, dt);
 
-  if (entity.frozenTimer > 0) {
-    entity.vx = moveToward(entity.vx, 0, MOVE_DECEL * dt);
-    entity.x += entity.vx * dt;
-    applyGravity(entity, dt);
-    applyKnockback(entity, dt);
-    entity.x = clamp(entity.x, GOAL_X_LEFT + entity.radius, GOAL_X_RIGHT - entity.radius);
-    return;
-  }
-
-  const effSpeed = entity.speed * (entity.speedBoostTimer > 0 ? SPEED_BOOST_MULT : 1);
   let dir = 0;
-  if (controls.left.some(k => keys[k])) dir -= 1;
-  if (controls.right.some(k => keys[k])) dir += 1;
+  if (keys['a'] || keys['arrowleft']) dir -= 1;
+  if (keys['d'] || keys['arrowright']) dir += 1;
 
-  const targetVx = dir * effSpeed;
+  const targetVx = dir * player.speed;
   const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
-  entity.vx = moveToward(entity.vx, targetVx, accel * dt);
-  entity.x += entity.vx * dt;
+  player.vx = moveToward(player.vx, targetVx, accel * dt);
+  player.x += player.vx * dt;
 
-  if (controls.jump.some(k => keys[k]) && entity.grounded) {
-    entity.vh = JUMP_VELOCITY;
-    entity.grounded = false;
+  if ((keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
+    player.vh = JUMP_VELOCITY;
+    player.grounded = false;
   }
 
-  applyGravity(entity, dt);
-  applyKnockback(entity, dt);
-
-  entity.x = clamp(entity.x, GOAL_X_LEFT + entity.radius, GOAL_X_RIGHT - entity.radius);
+  applyGravity(player, dt);
+  applyKnockback(player, dt);
+  player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
 }
 
 function updateOpponentAI(dt) {
-  updateEntityTimers(opponent, dt);
-
-  if (opponent.frozenTimer > 0) {
-    opponent.vx = moveToward(opponent.vx, 0, MOVE_DECEL * dt);
-    opponent.x += opponent.vx * dt;
-    applyGravity(opponent, dt);
-    applyKnockback(opponent, dt);
-    opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
-    return;
-  }
-
-  const effSpeed = opponent.speed * (opponent.speedBoostTimer > 0 ? SPEED_BOOST_MULT : 1);
+  updateShotTimers(opponent, dt);
 
   const toBallX = ball.x - opponent.x;
   let desiredDir = 0;
@@ -596,7 +352,7 @@ function updateOpponentAI(dt) {
   }
 
   const steer = clamp(desiredDir + sepDir * 1.3, -1, 1);
-  const targetVx = steer * effSpeed;
+  const targetVx = steer * opponent.speed;
   const accel = Math.abs(steer) > 0.05 ? MOVE_ACCEL : MOVE_DECEL;
   opponent.vx = moveToward(opponent.vx, targetVx, accel * dt);
   opponent.x += opponent.vx * dt;
@@ -608,15 +364,14 @@ function updateOpponentAI(dt) {
     opponent.grounded = false;
   }
 
-  const dist = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
-  if (dist < SHOOT_RANGE) {
+  const decisionDist = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
+  if (decisionDist < AI_KICK_DECISION_RANGE) {
     const shotType = ball.h < 55 ? 'low' : (Math.random() < 0.55 ? 'low' : 'high');
-    doKick(opponent, shotType);
+    tryShoot(opponent, shotType);
   }
 
   applyGravity(opponent, dt);
   applyKnockback(opponent, dt);
-
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
@@ -624,14 +379,8 @@ function applyGravity(entity, dt) {
   const g = entity.vh > 0 ? GRAVITY_PLAYER_UP : GRAVITY_PLAYER_DOWN;
   entity.vh -= g * dt;
   entity.h += entity.vh * dt;
-
-  if (entity.h <= 0) {
-    entity.h = 0;
-    entity.vh = 0;
-    entity.grounded = true;
-  } else {
-    entity.grounded = false;
-  }
+  if (entity.h <= 0) { entity.h = 0; entity.vh = 0; entity.grounded = true; }
+  else { entity.grounded = false; }
 }
 
 function applyKnockback(entity, dt) {
@@ -653,6 +402,7 @@ function moveBall(dt) {
 
   ball.x += ball.vx * dt;
   ball.h += ball.vh * dt;
+  ball.spin += (ball.vx / ball.radius) * dt; // rolling spin, purely cosmetic
 
   resolveBallWalls();
 }
@@ -660,26 +410,24 @@ function moveBall(dt) {
 function resolveBallWalls() {
   if (ball.h < 0) {
     ball.h = 0;
-    if (ball.vh < 0) {
-      ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
-      if (ball.vh < BALL_MIN_BOUNCE_VH) ball.vh = BALL_MIN_BOUNCE_VH;
-    }
+    if (ball.vh < 0) ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
+    if (Math.abs(ball.vh) < BALL_SETTLE_THRESHOLD) ball.vh = 0;
   }
-
   if (ball.h > CEILING_H) {
     ball.h = CEILING_H;
     if (ball.vh > 0) ball.vh = -Math.abs(ball.vh) * 0.5;
   }
 
-  const inLeftGoalOpening = ball.h < leftGoalHeight;
-  if (!inLeftGoalOpening && ball.x - ball.radius < GOAL_X_LEFT) {
-    ball.x = GOAL_X_LEFT + ball.radius;
-    ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
-  }
-  const inRightGoalOpening = ball.h < rightGoalHeight;
-  if (!inRightGoalOpening && ball.x + ball.radius > GOAL_X_RIGHT) {
-    ball.x = GOAL_X_RIGHT - ball.radius;
-    ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
+  const inGoalOpening = ball.h < GOAL_HEIGHT;
+  if (!inGoalOpening) {
+    if (ball.x - ball.radius < GOAL_X_LEFT) {
+      ball.x = GOAL_X_LEFT + ball.radius;
+      ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
+    }
+    if (ball.x + ball.radius > GOAL_X_RIGHT) {
+      ball.x = GOAL_X_RIGHT - ball.radius;
+      ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
+    }
   }
 
   const speed = Math.hypot(ball.vx, ball.vh);
@@ -691,86 +439,74 @@ function resolveBallWalls() {
 }
 
 /* ---------------------------------------------------------------------
-   ANTI-JAMMING PHYSICS — Squeeze Force
+   ENTITY HITBOX — head circle + boot circle + a capsule spanning the
+   torso between them, so there's no gap for the ball to slip through.
+   The boot candidate additionally gets a "toe slope" bias: near-
+   horizontal contacts get nudged upward, so a ball squeezed between
+   two players pops up and out instead of getting trapped oscillating
+   sideways forever.
    --------------------------------------------------------------------- */
-function checkSqueezeForce(dt) {
-  if (ball.squeezeCooldown > 0) {
-    ball.squeezeCooldown -= dt;
-    return;
-  }
-  if (ball.h >= SQUEEZE_GROUND_H) return;
-
-  const dPlayer = Math.hypot(ball.x - player.x, ball.h - (player.h + BOOT_OFFSET));
-  const dOpp = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
-  if (dPlayer > SQUEEZE_RANGE || dOpp > SQUEEZE_RANGE) return;
-
-  // Roughly wedged between the two — the ball sits on or near the line
-  // between them rather than off to one side of both.
-  const straddled = (ball.x - player.x) * (ball.x - opponent.x) <= (SQUEEZE_RANGE * 4);
-  const playersClose = Math.abs(player.x - opponent.x) < (player.radius + opponent.radius) * 2 + 46;
-  if (!straddled || !playersClose) return;
-
-  ball.vh = SQUEEZE_POP_VELOCITY;
-  ball.vx += (Math.random() - 0.5) * 180;
-  ball.squeezeCooldown = SQUEEZE_COOLDOWN_SECONDS;
-  playSqueezePopSound();
-}
-
-/* ---------------------------------------------------------------------
-   ENTITY HITBOX — head circle + sloped boot capsule + torso capsule
-   --------------------------------------------------------------------- */
-function pointOverlap(cx, cH, cR, kickPower) {
+function pointOverlap(cx, cH, cR, kickPower, toeSlope) {
   const dx = ball.x - cx;
   const dh = ball.h - cH;
   const dist = Math.hypot(dx, dh);
   const minDist = cR + ball.radius;
-  return {
-    dist, penetration: minDist - dist,
-    nx: dist > 0 ? dx / dist : 0,
-    nh: dist > 0 ? dh / dist : 1,
-    kickPower
-  };
+  const trueNx = dist > 0 ? dx / dist : 0;
+  const trueNh = dist > 0 ? dh / dist : 1;
+
+  // The TRUE normal always resolves position (guarantees the ball
+  // actually clears this shape's real boundary). The RESPONSE normal is
+  // what the bounce direction uses, and can be biased (toe slope)
+  // without ever leaving the ball still overlapping — those two jobs
+  // are now kept deliberately separate.
+  let responseNx = trueNx, responseNh = trueNh;
+  if (toeSlope && dist > 0) {
+    const UPWARD_BIAS = 0.6;
+    responseNh = trueNh + UPWARD_BIAS * (1 - Math.abs(trueNh));
+    const len = Math.hypot(responseNx, responseNh);
+    responseNx /= len; responseNh /= len;
+  }
+
+  return { dist, penetration: minDist - dist, nx: trueNx, nh: trueNh, responseNx, responseNh, kickPower };
 }
 
-function capsuleOverlap(x1, h1, x2, h2, cR, kickPower) {
-  const dx = x2 - x1, dh = h2 - h1;
-  const lenSq = dx * dx + dh * dh;
-  let t = lenSq > 0 ? ((ball.x - x1) * dx + (ball.h - h1) * dh) / lenSq : 0;
-  t = clamp(t, 0, 1);
-  return pointOverlap(x1 + t * dx, h1 + t * dh, cR, kickPower);
+function capsuleOverlap(cx, bottomH, topH, cR, kickPower) {
+  const clampedH = clamp(ball.h, bottomH, topH);
+  return pointOverlap(cx, clampedH, cR, kickPower, false);
 }
 
 function resolveDeepestContact(entity) {
-  const scale = entity.radius / PLAYER_RADIUS; // grows with the giant powerup
-  const dir = entity.attackDir;
-  const heelX = entity.x - dir * BOOT_HEEL_X_OFFSET * scale;
-  const heelH = entity.h + BOOT_HEEL_H_OFFSET * scale;
-  const toeX = entity.x + dir * BOOT_TOE_X_OFFSET * scale;
-  const toeH = entity.h + BOOT_TOE_H_OFFSET * scale;
+  // The capsule spans only the actual former gap (from the boot's own
+  // top edge to the head's own bottom edge) rather than the full
+  // boot-to-head centerline. If it overlapped the boot's own zone, its
+  // larger radius would out-compete the boot's toe-slope-biased contact
+  // on every deepest-penetration comparison, silently cancelling the
+  // pop-up behavior near the ground — which is exactly where it matters most.
+  const bootTopEdge = entity.h + BOOT_OFFSET + BOOT_COLLISION_RADIUS;
+  const headBottomEdge = entity.h + HEAD_OFFSET - HEAD_COLLISION_RADIUS;
 
   const candidates = [
-    pointOverlap(entity.x, entity.h + HEAD_OFFSET * scale, HEAD_COLLISION_RADIUS * scale, 1.1),
-    capsuleOverlap(heelX, heelH, toeX, toeH, BOOT_COLLISION_RADIUS * scale, 1.25),
-    capsuleOverlap(entity.x, entity.h + BOOT_OFFSET * scale, entity.x, entity.h + HEAD_OFFSET * scale, BODY_RADIUS * scale, 1.15)
+    pointOverlap(entity.x, entity.h + HEAD_OFFSET, HEAD_COLLISION_RADIUS, 1.1, false),
+    pointOverlap(entity.x, entity.h + BOOT_OFFSET, BOOT_COLLISION_RADIUS, 1.3, true),
+    capsuleOverlap(entity.x, bootTopEdge, headBottomEdge, BODY_RADIUS, 1.15)
   ];
 
   let best = null;
   for (const c of candidates) {
-    if (c.penetration > 0 && (!best || c.penetration > best.penetration)) best = c;
+    if (c.penetration > 0 && c.dist > 0 && (!best || c.penetration > best.penetration)) best = c;
   }
   if (!best) return false;
 
   ball.x += best.nx * best.penetration;
   ball.h += best.nh * best.penetration;
 
-  const dot = ball.vx * best.nx + ball.vh * best.nh;
-  const reflectedVx = ball.vx - 2 * dot * best.nx;
-  const reflectedVh = ball.vh - 2 * dot * best.nh;
+  const dot = ball.vx * best.responseNx + ball.vh * best.responseNh;
+  const reflectedVx = ball.vx - 2 * dot * best.responseNx;
+  const reflectedVh = ball.vh - 2 * dot * best.responseNh;
   const entitySpeed = Math.hypot(entity.vx, entity.vh);
 
-  ball.vx = reflectedVx * BALL_COLLISION_RESTITUTION + best.nx * entitySpeed * best.kickPower + entity.vx * 0.35;
-  ball.vh = reflectedVh * BALL_COLLISION_RESTITUTION + best.nh * entitySpeed * best.kickPower + entity.vh * 0.35;
-  lastBallToucher = entity;
+  ball.vx = reflectedVx * BALL_COLLISION_RESTITUTION + best.responseNx * entitySpeed * best.kickPower + entity.vx * 0.35;
+  ball.vh = reflectedVh * BALL_COLLISION_RESTITUTION + best.responseNh * entitySpeed * best.kickPower + entity.vh * 0.35;
   return true;
 }
 
@@ -784,132 +520,42 @@ function handleEntityBallCollision(entity) {
 }
 
 /* ---------------------------------------------------------------------
-   KICKS — decoupled from ball contact.
+   SHOOTING — the animation always plays on a valid press (gated only by
+   cooldown, never by ball position). Whether the ball actually gets hit
+   is decided separately by checkKickImpact, during the active middle
+   portion of that same swing — so the hitbox window matches what you
+   see on screen.
    --------------------------------------------------------------------- */
-function doKick(entity, type) {
-  if (entity.shotCooldown > 0 || entity.frozenTimer > 0) return false;
+function tryShoot(entity, type) {
+  if (entity.shotCooldown > 0) return false;
+  entity.shotCooldown = SHOT_COOLDOWN_SECONDS;
   entity.kickTimer = KICK_ANIM_DURATION;
   entity.kickType = type;
-  entity.kickHasHit = false;
-  entity.shotCooldown = SHOT_COOLDOWN_SECONDS;
+  entity.kickApplied = false;
   return true;
 }
 
-function kickSweepPoint(entity) {
-  const scale = entity.radius / PLAYER_RADIUS;
-  const w = entity.radius * 3.1;
-  const h = entity.radius * 1.9;
+function checkKickImpact(entity) {
+  if (entity.kickTimer <= 0 || !entity.kickType || entity.kickApplied) return;
+
   const progress = 1 - entity.kickTimer / KICK_ANIM_DURATION;
-  const swing = Math.sin(progress * Math.PI);
+  const inActiveWindow = progress > 0.25 && progress < 0.75;
+  if (!inActiveWindow) return;
 
-  if (entity.kickType === 'low') {
-    return {
-      x: entity.x + entity.attackDir * (w * 0.5 + swing * w * 0.55),
-      h: entity.h + BOOT_OFFSET * scale + swing * h * 0.2,
-      r: BOOT_COLLISION_RADIUS * 1.35 * scale,
-      progress
-    };
-  }
-  return {
-    x: entity.x + entity.attackDir * (w * 0.35 + swing * w * 0.4),
-    h: entity.h + BOOT_OFFSET * scale + swing * h * 1.7,
-    r: BOOT_COLLISION_RADIUS * 1.35 * scale,
-    progress
-  };
-}
-
-function updateKickHits(entity) {
-  if (entity.kickTimer <= 0 || entity.kickHasHit || !entity.kickType) return;
-
-  const sweep = kickSweepPoint(entity);
-  if (sweep.progress < KICK_ACTIVE_START || sweep.progress > KICK_ACTIVE_END) return;
-
-  const dist = Math.hypot(ball.x - sweep.x, ball.h - sweep.h);
-  if (dist > sweep.r + ball.radius) return;
+  const dist = Math.hypot(ball.x - entity.x, ball.h - (entity.h + BOOT_OFFSET));
+  if (dist > KICK_CONNECT_RANGE) return;
 
   const speed = entity.kickType === 'low' ? LOW_SHOT_SPEED : HIGH_SHOT_SPEED;
   const lift = entity.kickType === 'low' ? LOW_SHOT_LIFT : HIGH_SHOT_LIFT;
 
   ball.vx = entity.attackDir * speed + entity.vx * 0.25;
   ball.vh = lift + entity.vh * 0.25;
-  entity.kickHasHit = true;
-  lastBallToucher = entity;
-  playKickSound();
+  entity.kickApplied = true;
 }
 
-function updateEntityTimers(entity, dt) {
+function updateShotTimers(entity, dt) {
   entity.shotCooldown = Math.max(0, entity.shotCooldown - dt);
   entity.kickTimer = Math.max(0, entity.kickTimer - dt);
-  entity.frozenTimer = Math.max(0, entity.frozenTimer - dt);
-  entity.speedBoostTimer = Math.max(0, entity.speedBoostTimer - dt);
-  if (entity.giantTimer > 0) {
-    entity.giantTimer = Math.max(0, entity.giantTimer - dt);
-    if (entity.giantTimer <= 0) entity.radius = entity.baseRadius;
-  }
-}
-
-/* ---------------------------------------------------------------------
-   RANDOM STAR POWERUPS
-   --------------------------------------------------------------------- */
-function spawnStar() {
-  const type = POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
-
-  // Alternate which half of the pitch the star lands on each spawn,
-  // so neither player consistently gets an easier star to reach.
-  const side = starNextSide;
-  starNextSide = side === 'left' ? 'right' : 'left';
-
-  const pitchMid = CANVAS_W / 2;
-  const halfGap = 20; // small buffer either side of the halfway line
-  let x, h;
-  if (Math.random() < 0.4) {
-    // Near mid-pitch, nudged toward the assigned side
-    x = pitchMid + (side === 'left' ? -1 : 1) * (halfGap + Math.random() * 60);
-    h = 150 + Math.random() * 60;
-  } else {
-    // Somewhere random, high up, but confined to the assigned half
-    const minX = side === 'left' ? GOAL_X_LEFT + 110 : pitchMid + halfGap;
-    const maxX = side === 'left' ? pitchMid - halfGap : GOAL_X_RIGHT - 110;
-    x = minX + Math.random() * Math.max(10, maxX - minX);
-    h = 160 + Math.random() * Math.max(20, CEILING_H - 180);
-  }
-  star = { x, h, type };
-}
-
-function checkStarPickup() {
-  const dist = Math.hypot(ball.x - star.x, ball.h - star.h);
-  if (dist > STAR_RADIUS + ball.radius) return;
-
-  if (lastBallToucher) applyPowerup(star.type, lastBallToucher);
-  star = null;
-  playPowerupSound();
-}
-
-function applyPowerup(type, entity) {
-  const other = entity === player ? opponent : player;
-  switch (type) {
-    case 'tallGoal':
-      // Boosts the height of the goal this player is shooting AT.
-      if (entity.attackDir === 1) {
-        rightGoalHeight = GOAL_HEIGHT + GOAL_BOOST_AMOUNT;
-        rightGoalBoostTimer = GOAL_BOOST_DURATION;
-      } else {
-        leftGoalHeight = GOAL_HEIGHT + GOAL_BOOST_AMOUNT;
-        leftGoalBoostTimer = GOAL_BOOST_DURATION;
-      }
-      break;
-    case 'freeze':
-      other.frozenTimer = FREEZE_DURATION;
-      other.vx = 0;
-      break;
-    case 'speed':
-      entity.speedBoostTimer = SPEED_BOOST_DURATION;
-      break;
-    case 'giant':
-      entity.giantTimer = GIANT_DURATION;
-      entity.radius = entity.baseRadius * GIANT_SCALE;
-      break;
-  }
 }
 
 function handleBodyCollision(a, b) {
@@ -925,123 +571,61 @@ function handleBodyCollision(a, b) {
     b.x += dir * overlap;
 
     const KNOCK_STRENGTH = 0.5;
-    const aSpeed = Math.abs(a.vx);
-    const bSpeed = Math.abs(b.vx);
-    b.knockX += dir * aSpeed * KNOCK_STRENGTH;
-    a.knockX -= dir * bSpeed * KNOCK_STRENGTH;
+    b.knockX += dir * Math.abs(a.vx) * KNOCK_STRENGTH;
+    a.knockX -= dir * Math.abs(b.vx) * KNOCK_STRENGTH;
   }
 }
 
-/* ---------------------------------------------------------------------
-   GOALS & MATCH FLOW
-   --------------------------------------------------------------------- */
 function handleGoals() {
   if (ball.x + ball.radius < GOAL_X_LEFT) {
     scoreRight++;
-    playGoalSound();
-    triggerGoal('left');
+    document.getElementById('scoreRight').textContent = scoreRight;
+    startGoalPause('left');
     return true;
   }
   if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
-    playGoalSound();
-    triggerGoal('right');
+    document.getElementById('scoreLeft').textContent = scoreLeft;
+    startGoalPause('right');
     return true;
   }
   return false;
 }
 
-function triggerGoal(concedingSide) {
-  gameState = 'goal';
-  goalTimer = GOAL_FREEZE_SECONDS;
-  pendingConcedingSide = concedingSide;
+function startGoalPause(concedingSide) {
+  gamePhase = 'goalPause';
+  phaseTimer = GOAL_PAUSE_DURATION;
+  lastConcedingSide = concedingSide;
 }
 
-function resetEntityForKickoff(entity, x) {
-  entity.x = x;
-  entity.h = 0;
-  entity.vx = 0;
-  entity.vh = 0;
-  entity.knockX = 0;
-  entity.grounded = true;
-  entity.shotCooldown = 0;
-  entity.kickTimer = 0;
-  entity.kickType = null;
-  entity.kickHasHit = false;
-  entity.frozenTimer = 0;
-  entity.speedBoostTimer = 0;
-  entity.giantTimer = 0;
-  entity.radius = entity.baseRadius;
+// Concession kickoff: the ball drops closer to whoever just conceded,
+// giving them a fair first chance to clear it instead of a neutral
+// 50/50 restart every single time.
+function resetAfterGoal() {
+  const centerX = CANVAS_W / 2;
+  const bias = (GOAL_X_RIGHT - GOAL_X_LEFT) * 0.15;
+  let ballX = centerX;
+  if (lastConcedingSide === 'left') ballX = centerX - bias;
+  else if (lastConcedingSide === 'right') ballX = centerX + bias;
+
+  ball.x = ballX; ball.h = 200; ball.vx = 0; ball.vh = 0; ball.spin = 0;
+
+  player.x = GOAL_X_LEFT + 160; player.h = 0; player.vx = 0; player.vh = 0;
+  player.knockX = 0; player.grounded = true; player.shotCooldown = 0;
+  player.kickTimer = 0; player.kickApplied = false;
+
+  opponent.x = GOAL_X_RIGHT - 160; opponent.h = 0; opponent.vx = 0; opponent.vh = 0;
+  opponent.knockX = 0; opponent.grounded = true; opponent.shotCooldown = 0;
+  opponent.kickTimer = 0; opponent.kickApplied = false;
 }
 
-function resetPitchPowerups(preserveStar) {
-  // On a goal reset we keep any star that was already out on the pitch —
-  // and let its countdown keep running from where it left off — so a
-  // goal doesn't rob a star that was already spawned for that window.
-  // On a full match reset (new match / back to menu) the star always clears.
-  if (!preserveStar) {
-    star = null;
-    starSpawnTimer = STAR_SPAWN_INTERVAL;
-  }
-  lastBallToucher = null;
-  leftGoalHeight = GOAL_HEIGHT;
-  rightGoalHeight = GOAL_HEIGHT;
-  leftGoalBoostTimer = 0;
-  rightGoalBoostTimer = 0;
-}
-
-const CONCESSION_BIAS = 110;
-
-function resetAfterGoal(concedingSide) {
-  const bias = concedingSide === 'left' ? -CONCESSION_BIAS : CONCESSION_BIAS;
-  ball.x = CANVAS_W / 2 + bias;
-  ball.h = 190;
-  ball.vx = 0;
-  ball.vh = 0;
-  ball.squeezeCooldown = 0;
-
-  resetPitchPowerups(true); // keep any star still on the pitch through kickoff
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
-}
-
-function startMatch() {
-  scoreLeft = 0;
-  scoreRight = 0;
-  matchTime = 60;
-  gameState = 'countdown';
-  countdownIndex = 0;
-  countdownTimer = COUNTDOWN_PHASE_DURATION;
-
-  ball.x = CANVAS_W / 2;
-  ball.h = 220;
-  ball.vx = 0;
-  ball.vh = 0;
-  ball.squeezeCooldown = 0;
-
-  starNextSide = Math.random() < 0.5 ? 'left' : 'right';
-  resetPitchPowerups();
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
-}
-
-function goToMenu() {
-  scoreLeft = 0;
-  scoreRight = 0;
-  matchTime = 60;
-  gameMode = null;
-  gameState = 'menu';
-  menuHover = null;
-
-  ball.x = CANVAS_W / 2;
-  ball.h = 220;
-  ball.vx = 0;
-  ball.vh = 0;
-  ball.squeezeCooldown = 0;
-
-  resetPitchPowerups();
-  resetEntityForKickoff(player, GOAL_X_LEFT + 140);
-  resetEntityForKickoff(opponent, GOAL_X_RIGHT - 140);
+function restartMatch() {
+  scoreLeft = 0; scoreRight = 0;
+  document.getElementById('scoreLeft').textContent = '0';
+  document.getElementById('scoreRight').textContent = '0';
+  lastConcedingSide = null;
+  resetAfterGoal();
+  startPregame();
 }
 
 /* ---------------------------------------------------------------------
@@ -1053,78 +637,58 @@ function render() {
   drawPitch();
   drawGoal(true);
   drawGoal(false);
-  drawStar();
   drawEntitiesSorted();
-  drawScoreboard();
+  drawTimerBadge();
 
-  if (gameState === 'menu') drawMenuOverlay();
-  if (gameState === 'countdown') drawCountdownOverlay();
-  if (gameState === 'goal') drawGoalBanner();
-  if (gameState === 'fulltime') drawFullTimeOverlay();
+  if (gamePhase === 'pregame') drawPregameOverlay();
+  if (gamePhase === 'goalPause') drawGoalBanner();
+  if (gamePhase === 'ended') drawEndedOverlay();
 }
 
 function drawSky() {
-  const gradient = ctx.createLinearGradient(0, HUD_HEIGHT, 0, GROUND_Y);
-  gradient.addColorStop(0, '#050b16');
-  gradient.addColorStop(0.55, '#0c1b2e');
-  gradient.addColorStop(1, '#173047');
+  const gradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  gradient.addColorStop(0, '#0b1622');
+  gradient.addColorStop(0.6, '#132a3a');
+  gradient.addColorStop(1, '#1f4550');
   ctx.fillStyle = gradient;
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, GROUND_Y - HUD_HEIGHT);
+  ctx.fillRect(0, 0, CANVAS_W, GROUND_Y);
 
-  ctx.fillStyle = 'rgba(10,16,24,0.85)';
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, 22);
-  for (let i = 0; i < 14; i++) {
-    const bx = 20 + i * ((CANVAS_W - 40) / 13);
-    ctx.fillStyle = 'rgba(255,255,255,0.05)';
-    ctx.fillRect(bx, HUD_HEIGHT + 4, 3, 14);
-  }
-  const towerXs = [55, CANVAS_W - 55];
-  towerXs.forEach(tx => {
-    ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(tx - 4, HUD_HEIGHT + 2, 8, 46);
-    ctx.fillStyle = 'rgba(255,244,214,0.85)';
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 3; c++) {
-        ctx.beginPath();
-        ctx.arc(tx - 8 + c * 8, HUD_HEIGHT + 8 + r * 8, 2.4, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+  [CANVAS_W * 0.15, CANVAS_W * 0.5, CANVAS_W * 0.85].forEach(lx => {
+    const glow = ctx.createRadialGradient(lx, 20, 4, lx, 20, 130);
+    glow.addColorStop(0, 'rgba(255,255,230,0.22)');
+    glow.addColorStop(1, 'rgba(255,255,230,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(lx, 20, 130, 0, Math.PI * 2);
+    ctx.fill();
   });
 }
 
 function drawPitch() {
-  const pitchTop = GROUND_Y;
-  const pitchH = CANVAS_H - GROUND_Y;
+  ctx.fillStyle = '#2e7d4f';
+  ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
 
-  const stripeW = 44;
-  let toggle = false;
-  for (let x = 0; x < CANVAS_W; x += stripeW) {
-    ctx.fillStyle = toggle ? '#2f8f4e' : '#279043';
-    ctx.fillRect(x, pitchTop, stripeW + 1, pitchH);
-    toggle = !toggle;
+  const stripeW = 54;
+  for (let x = 0, i = 0; x < CANVAS_W; x += stripeW, i++) {
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
+    ctx.fillRect(x, GROUND_Y, stripeW, CANVAS_H - GROUND_Y);
   }
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
   ctx.lineWidth = 3;
   ctx.beginPath();
   ctx.moveTo(0, GROUND_Y);
   ctx.lineTo(CANVAS_W, GROUND_Y);
   ctx.stroke();
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 44, 8, 0, Math.PI, Math.PI * 2);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(CANVAS_W / 2, GROUND_Y - 8);
-  ctx.lineTo(CANVAS_W / 2, HUD_HEIGHT);
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.ellipse(CANVAS_W / 2, GROUND_Y, 42, 7, 0, Math.PI, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(CANVAS_W / 2, GROUND_Y, 3, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fill();
 }
 
@@ -1133,54 +697,115 @@ function drawGoal(isLeft) {
   const backX = isLeft ? GOAL_X_LEFT - GOAL_NET_DEPTH : GOAL_X_RIGHT + GOAL_NET_DEPTH;
   const leftX = Math.min(frontX, backX);
   const rightX = Math.max(frontX, backX);
-  const goalH = isLeft ? leftGoalHeight : rightGoalHeight;
-  const boosted = goalH > GOAL_HEIGHT;
-  const topY = GROUND_Y - goalH;
+  const topY = GROUND_Y - GOAL_HEIGHT;
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
   ctx.lineWidth = 1;
   const spacing = 9;
   for (let x = leftX; x <= rightX; x += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(x, topY);
-    ctx.lineTo(x, GROUND_Y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x, topY); ctx.lineTo(x, GROUND_Y); ctx.stroke();
   }
   for (let y = topY; y <= GROUND_Y; y += spacing) {
-    ctx.beginPath();
-    ctx.moveTo(leftX, y);
-    ctx.lineTo(rightX, y);
-    ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); ctx.stroke();
   }
 
-  ctx.strokeStyle = boosted ? '#ffd600' : '#eafaf0';
-  ctx.lineWidth = boosted ? 5 : 4;
+  ctx.strokeStyle = '#eafaf0';
+  ctx.lineWidth = 4.5;
   ctx.lineCap = 'round';
-
-  ctx.beginPath();
-  ctx.moveTo(frontX, GROUND_Y);
-  ctx.lineTo(frontX, topY);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(backX, GROUND_Y);
-  ctx.lineTo(backX, topY);
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.moveTo(leftX, topY);
-  ctx.lineTo(rightX, topY);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(frontX, GROUND_Y); ctx.lineTo(frontX, topY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(backX, GROUND_Y); ctx.lineTo(backX, topY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(leftX, topY); ctx.lineTo(rightX, topY); ctx.stroke();
 
   ctx.fillStyle = '#eafaf0';
-  ctx.beginPath();
-  ctx.ellipse(frontX, GROUND_Y, 6, 2.6, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(backX, GROUND_Y, 6, 2.6, 0, 0, Math.PI * 2);
-  ctx.fill();
-
+  ctx.beginPath(); ctx.ellipse(frontX, GROUND_Y, 6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(backX, GROUND_Y, 6, 2.5, 0, 0, Math.PI * 2); ctx.fill();
   ctx.lineCap = 'butt';
+}
+
+function drawTimerBadge() {
+  if (gamePhase === 'pregame') return;
+  const secs = Math.ceil(matchTimeRemaining);
+  const urgent = secs <= 10 && gamePhase === 'playing';
+
+  const bw = 84, bh = 38, bx = CANVAS_W / 2 - bw / 2, by = 12;
+  roundRectPath(bx, by, bw, bh, 9);
+  ctx.fillStyle = urgent ? 'rgba(150,20,20,0.88)' : 'rgba(0,0,0,0.55)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 21px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(secs), CANVAS_W / 2, by + bh / 2 + 1);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPregameOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  const text = phaseTimer > 2.6 ? '3' : phaseTimer > 1.6 ? '2' : phaseTimer > 0.6 ? '1' : 'GO!';
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 72px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, CANVAS_W / 2, CANVAS_H / 2);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawGoalBanner() {
+  const elapsed = GOAL_PAUSE_DURATION - phaseTimer;
+  const scale = elapsed < 0.15 ? elapsed / 0.15 : 1;
+  const alpha = elapsed > GOAL_PAUSE_DURATION - 0.3 ? clamp((GOAL_PAUSE_DURATION - elapsed) / 0.3, 0, 1) : 1;
+
+  ctx.fillStyle = `rgba(0,0,0,${0.4 * alpha})`;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.save();
+  ctx.translate(CANVAS_W / 2, CANVAS_H / 2);
+  ctx.scale(Math.max(scale, 0.01), Math.max(scale, 0.01));
+  ctx.globalAlpha = alpha;
+  ctx.font = 'bold 80px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = '#8a2b0a';
+  ctx.strokeText('GOAL!', 0, 0);
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillText('GOAL!', 0, 0);
+  ctx.restore();
+
+  ctx.globalAlpha = 1;
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawEndedOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 42px Segoe UI, Arial, sans-serif';
+  ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 30);
+
+  const result = scoreLeft > scoreRight ? 'You Win!' : scoreLeft < scoreRight ? 'AI Wins' : 'Draw!';
+  ctx.font = 'bold 24px Segoe UI, Arial, sans-serif';
+  ctx.fillText(result, CANVAS_W / 2, CANVAS_H / 2 + 14);
+
+  ctx.font = '15px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#9fcbb0';
+  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 48);
+
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
 }
 
 function drawEntitiesSorted() {
@@ -1200,129 +825,86 @@ function drawGroundShadow(x, h, baseRadius) {
   const t = clamp(h / 160, 0, 1);
   const rx = baseRadius * (1 - 0.45 * t);
   const ry = baseRadius * 0.32 * (1 - 0.45 * t);
-  const alpha = 0.32 * (1 - 0.5 * t);
-
+  const alpha = 0.3 * (1 - 0.5 * t);
   ctx.beginPath();
   ctx.ellipse(x, GROUND_Y, rx, ry, 0, 0, Math.PI * 2);
   ctx.fillStyle = `rgba(0,0,0,${alpha})`;
   ctx.fill();
 }
 
-function drawStar() {
-  if (!star) return;
-  const sy = groundToScreenY(star.h);
-  const t = performance.now() / 250;
-  const bob = Math.sin(t) * 4;
-  const pulse = 0.85 + 0.15 * Math.sin(t * 1.6);
-
-  ctx.save();
-  ctx.translate(star.x, sy + bob);
-
+/* -----------------------------------------------------------------------
+   BALL — a real football pattern (pentagon tiling) that spins with its
+   rolling motion, instead of a flat tan circle.
+   ----------------------------------------------------------------------- */
+function regularPolygonPath(cx, cy, r, sides, rotation) {
   ctx.beginPath();
-  ctx.arc(0, 0, STAR_RADIUS * 1.7 * pulse, 0, Math.PI * 2);
-  ctx.fillStyle = POWERUP_COLORS[star.type] + '33';
-  ctx.fill();
-
-  drawStarShape(0, 0, STAR_RADIUS, POWERUP_COLORS[star.type]);
-
-  ctx.fillStyle = '#0b1015';
-  ctx.font = 'bold 9px Segoe UI, Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-  ctx.lineWidth = 3;
-  ctx.strokeText(POWERUP_LABELS[star.type], 0, STAR_RADIUS + 13);
-  ctx.fillText(POWERUP_LABELS[star.type], 0, STAR_RADIUS + 13);
-  ctx.textAlign = 'start';
-
-  ctx.restore();
-}
-
-function drawStarShape(cx, cy, r, color) {
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.beginPath();
-  for (let i = 0; i < 5; i++) {
-    const outerAngle = -Math.PI / 2 + i * (Math.PI * 2 / 5);
-    const innerAngle = outerAngle + Math.PI / 5;
-    const ox = Math.cos(outerAngle) * r, oy = Math.sin(outerAngle) * r;
-    const ix = Math.cos(innerAngle) * r * 0.45, iy = Math.sin(innerAngle) * r * 0.45;
-    if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
-    ctx.lineTo(ix, iy);
+  for (let i = 0; i < sides; i++) {
+    const a = rotation + i * (2 * Math.PI / sides) - Math.PI / 2;
+    const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
   }
   ctx.closePath();
-  ctx.fillStyle = color;
+}
+
+function drawSoccerPattern(radius) {
+  ctx.fillStyle = '#1c1c1c';
+  regularPolygonPath(0, 0, radius * 0.36, 5, 0);
   ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.stroke();
-  ctx.restore();
+  for (let i = 0; i < 5; i++) {
+    const angle = i * (2 * Math.PI / 5);
+    const cx = Math.cos(angle - Math.PI / 2) * radius * 0.72;
+    const cy = Math.sin(angle - Math.PI / 2) * radius * 0.72;
+    regularPolygonPath(cx, cy, radius * 0.24, 5, angle);
+    ctx.fill();
+  }
 }
 
 function drawBall(entity) {
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
   const screenY = groundToScreenY(entity.h);
+
+  ctx.save();
+  ctx.translate(entity.x, screenY);
+
+  const base = ctx.createRadialGradient(-entity.radius * 0.3, -entity.radius * 0.3, entity.radius * 0.1, 0, 0, entity.radius);
+  base.addColorStop(0, '#ffffff');
+  base.addColorStop(1, '#e2dcce');
   ctx.beginPath();
-  ctx.arc(entity.x, screenY, entity.radius, 0, Math.PI * 2);
-  ctx.fillStyle = entity.color;
+  ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
+  ctx.fillStyle = base;
   ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = entity.dark;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.rotate(entity.spin);
+  drawSoccerPattern(entity.radius);
+  ctx.restore();
+
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.arc(0, 0, entity.radius, 0, Math.PI * 2);
   ctx.stroke();
 
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.arc(entity.x, screenY, entity.radius * 0.55, 0.3, Math.PI - 0.3);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(entity.x, screenY, entity.radius * 0.55, Math.PI + 0.3, Math.PI * 2 - 0.3);
-  ctx.stroke();
+  ctx.restore();
 }
 
 function drawCharacter(entity) {
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
 
-  const scale = entity.radius / PLAYER_RADIUS;
   const baseY = groundToScreenY(entity.h);
-  const bootY = baseY - BOOT_OFFSET * scale;
-  const headY = baseY - HEAD_OFFSET * scale;
+  const bootY = baseY - BOOT_OFFSET;
+  const headY = baseY - HEAD_OFFSET;
 
   drawBoot(entity.x, bootY, entity);
   drawTorso(entity.x, bootY, headY, entity);
   drawHead(entity.x, headY, entity);
-  drawEntityEffects(entity, headY);
-}
-
-function drawEntityEffects(entity, headY) {
-  if (entity.frozenTimer > 0) {
-    ctx.save();
-    ctx.globalAlpha = 0.3;
-    ctx.beginPath();
-    ctx.arc(entity.x, headY, entity.radius * 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#bfe9ff';
-    ctx.fill();
-    ctx.restore();
-  }
-
-  const icons = [];
-  if (entity.frozenTimer > 0) icons.push('❄');
-  if (entity.speedBoostTimer > 0) icons.push('⚡');
-  if (entity.giantTimer > 0) icons.push('⬆');
-  if (!icons.length) return;
-
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.font = 'bold 14px Segoe UI, Arial, sans-serif';
-  ctx.fillStyle = '#fff';
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 4;
-  ctx.fillText(icons.join(' '), entity.x, headY - entity.radius * 2.5);
-  ctx.restore();
 }
 
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
-  const scale = entity.radius / PLAYER_RADIUS;
-  const width = BODY_RADIUS * 1.7 * scale;
+  const width = BODY_RADIUS * 1.7;
   const top = headScreenY + entity.radius * 0.9;
   const bottom = bootScreenY - entity.radius * 0.15;
 
@@ -1455,11 +1037,35 @@ function drawHead(cx, cy, entity) {
 
   drawHair(entity, R);
 
-  // --- Hamza-Eyes: a stylized, fierce eye/eyebrow glyph shaped after
-  // the Arabic letter hamza (ء) — one sharp curling hook stands in for
-  // both eyebrow and eye in a single continuous stroke.
-  drawHamzaEye(-1, R, entity);
-  drawHamzaEye(1, R, entity);
+  ctx.strokeStyle = entity.browColor;
+  ctx.lineWidth = R * 0.14;
+  ctx.lineCap = 'round';
+  [-1, 1].forEach(side => {
+    ctx.beginPath();
+    ctx.moveTo(side * R * 0.14, -R * 0.1);
+    ctx.lineTo(side * R * 0.5, -R * 0.3);
+    ctx.stroke();
+  });
+
+  [-1, 1].forEach(side => {
+    ctx.beginPath();
+    ctx.ellipse(side * R * 0.35, R * 0.03, R * 0.16, R * 0.12, 0, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(side * R * 0.37, R * 0.04, R * 0.07, 0, Math.PI * 2);
+    ctx.fillStyle = entity.eyeColor;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(side * R * 0.37, R * 0.04, R * 0.03, 0, Math.PI * 2);
+    ctx.fillStyle = '#000';
+    ctx.fill();
+  });
 
   ctx.strokeStyle = 'rgba(0,0,0,0.35)';
   ctx.lineWidth = 1.5;
@@ -1479,45 +1085,6 @@ function drawHead(cx, cy, entity) {
 
   ctx.fillStyle = '#fff';
   roundRectPath(-R * 0.2, R * 0.4, R * 0.4, R * 0.09, R * 0.03);
-  ctx.fill();
-
-  ctx.restore();
-}
-
-function drawHamzaEye(side, R, entity) {
-  ctx.save();
-  ctx.translate(side * R * 0.37, -R * 0.02);
-  ctx.scale(side, 1);
-
-  // A sharp curling hook — the hamza glyph — doubling as brow + eye.
-  ctx.beginPath();
-  ctx.moveTo(-R * 0.17, -R * 0.34);
-  ctx.quadraticCurveTo(R * 0.13, -R * 0.4, R * 0.2, -R * 0.14);
-  ctx.quadraticCurveTo(R * 0.24, R * 0.06, R * 0.06, R * 0.15);
-  ctx.quadraticCurveTo(-R * 0.08, R * 0.2, -R * 0.1, R * 0.06);
-  ctx.lineWidth = R * 0.13;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = entity.browColor;
-  ctx.stroke();
-
-  // A sharp glinting eye core sitting in the curl
-  ctx.beginPath();
-  ctx.arc(R * 0.03, -R * 0.06, R * 0.08, 0, Math.PI * 2);
-  ctx.fillStyle = '#fff';
-  ctx.fill();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.stroke();
-
-  ctx.beginPath();
-  ctx.arc(R * 0.05, -R * 0.05, R * 0.055, 0, Math.PI * 2);
-  ctx.fillStyle = entity.eyeColor;
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.arc(R * 0.06, -R * 0.04, R * 0.025, 0, Math.PI * 2);
-  ctx.fillStyle = '#000';
   ctx.fill();
 
   ctx.restore();
@@ -1554,225 +1121,6 @@ function drawHair(entity, R) {
     ctx.fill();
     ctx.stroke();
   }
-}
-
-/* ---------------------------------------------------------------------
-   ARCADE UI — scoreboard, cooldown badges, countdown, goal banner,
-   full-time screen (with victory crown), main menu
-   --------------------------------------------------------------------- */
-function drawScoreboard() {
-  ctx.fillStyle = '#0b1015';
-  ctx.fillRect(0, 0, CANVAS_W, HUD_HEIGHT);
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillRect(0, HUD_HEIGHT - 3, CANVAS_W, 3);
-
-  drawScoreChip(18, '#1c3a5c', '#3fa7ff', 'BLUE', scoreLeft, 'left');
-  drawScoreChip(CANVAS_W - 18, '#5c1c1c', '#ff5b5b', 'RED', scoreRight, 'right');
-
-  const timeLeft = Math.max(0, Math.ceil(matchTime));
-  const mm = Math.floor(timeLeft / 60);
-  const ss = String(timeLeft % 60).padStart(2, '0');
-  ctx.textAlign = 'center';
-  ctx.fillStyle = timeLeft <= 10 && gameState === 'playing' ? '#ff6b6b' : '#eafaf0';
-  ctx.font = 'bold 22px Segoe UI, Arial, sans-serif';
-  ctx.fillText(`${mm}:${ss}`, CANVAS_W / 2, HUD_HEIGHT / 2 + 8);
-  ctx.textAlign = 'start';
-}
-
-function drawScoreChip(edgeX, panelColor, accent, label, score, side) {
-  const w = 150, h = 32, y = 11;
-  const x = side === 'left' ? edgeX : edgeX - w;
-
-  roundRectPath(x, y, w, h, 8);
-  ctx.fillStyle = panelColor;
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = accent;
-  ctx.stroke();
-
-  ctx.fillStyle = accent;
-  ctx.font = 'bold 12px Segoe UI, Arial, sans-serif';
-  ctx.textAlign = side === 'left' ? 'start' : 'end';
-  ctx.fillText(label, side === 'left' ? x + 12 : x + w - 12, y + h / 2 + 4);
-
-  ctx.fillStyle = '#eafaf0';
-  ctx.font = 'bold 20px Segoe UI, Arial, sans-serif';
-  ctx.textAlign = side === 'left' ? 'end' : 'start';
-  ctx.fillText(String(score), side === 'left' ? x + w - 14 : x + 14, y + h / 2 + 7);
-  ctx.textAlign = 'start';
-}
-
-function drawCountdownOverlay() {
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
-
-  const text = COUNTDOWN_PHASES[Math.min(countdownIndex, COUNTDOWN_PHASES.length - 1)];
-  const isGo = text === 'GO!';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = isGo ? '#8fffb0' : '#eafaf0';
-  ctx.font = `bold ${isGo ? 54 : 68}px Segoe UI, Arial, sans-serif`;
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 12;
-  ctx.fillText(text, CANVAS_W / 2, HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2 + 20);
-  ctx.shadowBlur = 0;
-  ctx.textAlign = 'start';
-}
-
-function drawGoalBanner() {
-  const progress = 1 - goalTimer / GOAL_FREEZE_SECONDS;
-  const pop = Math.min(1, progress / 0.25);
-  const scale = 0.6 + 0.4 * Math.min(1, pop);
-
-  ctx.fillStyle = `rgba(255,214,0,${0.18 + 0.1 * Math.sin(progress * Math.PI * 6)})`;
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
-
-  const cx = CANVAS_W / 2, cy = HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2;
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.scale(scale, scale);
-  ctx.textAlign = 'center';
-  ctx.font = 'bold 84px Segoe UI, Arial, sans-serif';
-  ctx.lineWidth = 8;
-  ctx.strokeStyle = '#7a3d00';
-  ctx.strokeText('GOAL!', 0, 20);
-  ctx.fillStyle = '#ffd600';
-  ctx.fillText('GOAL!', 0, 20);
-  ctx.restore();
-  ctx.textAlign = 'start';
-}
-
-function drawVictoryCrown(entity) {
-  const headScreenY = groundToScreenY(entity.h + HEAD_OFFSET);
-  const R = entity.radius * 2.0;
-  const cx = entity.x;
-  const baseY = headScreenY - R * 1.08;
-  const w = R * 1.9, h = R * 1.1;
-
-  ctx.save();
-  ctx.translate(cx, baseY);
-
-  const grad = ctx.createLinearGradient(0, -h, 0, 0);
-  grad.addColorStop(0, '#fff6c8');
-  grad.addColorStop(0.5, '#ffd600');
-  grad.addColorStop(1, '#c9910a');
-
-  ctx.beginPath();
-  ctx.moveTo(-w / 2, 0);
-  ctx.lineTo(-w / 2, -h * 0.35);
-  ctx.lineTo(-w * 0.32, -h * 0.85);
-  ctx.lineTo(-w * 0.14, -h * 0.4);
-  ctx.lineTo(0, -h);
-  ctx.lineTo(w * 0.14, -h * 0.4);
-  ctx.lineTo(w * 0.32, -h * 0.85);
-  ctx.lineTo(w / 2, -h * 0.35);
-  ctx.lineTo(w / 2, 0);
-  ctx.closePath();
-  ctx.fillStyle = grad;
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#8a6300';
-  ctx.stroke();
-
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillRect(-w / 2, -h * 0.18, w, h * 0.12);
-
-  const jewelColors = ['#ff4d4d', '#3fa7ff', '#4dff88'];
-  [-w * 0.32, 0, w * 0.32].forEach((jx, i) => {
-    ctx.beginPath();
-    ctx.arc(jx, -h * (i === 1 ? 0.78 : 0.62), R * 0.09, 0, Math.PI * 2);
-    ctx.fillStyle = jewelColors[i];
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.stroke();
-  });
-
-  const t = performance.now() / 300;
-  ctx.globalAlpha = 0.5 + 0.5 * Math.sin(t);
-  ctx.beginPath();
-  ctx.arc(w * 0.36, -h * 0.9, 3, 0, Math.PI * 2);
-  ctx.fillStyle = '#fff';
-  ctx.fill();
-  ctx.globalAlpha = 1;
-
-  ctx.restore();
-}
-
-function drawFullTimeOverlay() {
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
-
-  if (scoreLeft !== scoreRight) {
-    const winner = scoreLeft > scoreRight ? player : opponent;
-    drawVictoryCrown(winner);
-  }
-
-  const cx = CANVAS_W / 2;
-  const cy = HUD_HEIGHT + (CANVAS_H - HUD_HEIGHT) / 2;
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#eafaf0';
-  ctx.font = 'bold 40px Segoe UI, Arial, sans-serif';
-  ctx.fillText('FULL TIME', cx, cy - 26);
-
-  ctx.font = 'bold 26px Segoe UI, Arial, sans-serif';
-  const resultText = scoreLeft === scoreRight
-    ? `${scoreLeft} — ${scoreRight}  DRAW`
-    : scoreLeft > scoreRight
-      ? `BLUE WINS  ${scoreLeft} — ${scoreRight}`
-      : `RED WINS  ${scoreLeft} — ${scoreRight}`;
-  ctx.fillStyle = '#eafaf0';
-  ctx.fillText(resultText, cx, cy + 12);
-
-  ctx.font = 'bold 16px Segoe UI, Arial, sans-serif';
-  ctx.fillStyle = '#8fffb0';
-  ctx.fillText('Press R to Rematch', cx, cy + 46);
-  ctx.fillStyle = '#ffd600';
-  ctx.fillText('Press M for Main Menu', cx, cy + 70);
-  ctx.textAlign = 'start';
-}
-
-function drawMenuOverlay() {
-  ctx.fillStyle = 'rgba(4,8,14,0.72)';
-  ctx.fillRect(0, HUD_HEIGHT, CANVAS_W, CANVAS_H - HUD_HEIGHT);
-
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd600';
-  ctx.font = 'bold 40px Segoe UI, Arial, sans-serif';
-  ctx.shadowColor = 'rgba(0,0,0,0.6)';
-  ctx.shadowBlur = 10;
-  ctx.fillText('HEAD SOCCER ARCADE', CANVAS_W / 2, HUD_HEIGHT + 64);
-  ctx.shadowBlur = 0;
-
-  ctx.fillStyle = '#9fcbb0';
-  ctx.font = '14px Segoe UI, Arial, sans-serif';
-  ctx.fillText('Choose a game mode to kick off', CANVAS_W / 2, HUD_HEIGHT + 92);
-
-  menuButtons.forEach(btn => {
-    const hover = menuHover === btn.mode;
-    roundRectPath(btn.x, btn.y, MENU_BTN_W, MENU_BTN_H, 12);
-    ctx.fillStyle = hover ? 'rgba(63,167,255,0.28)' : 'rgba(255,255,255,0.08)';
-    ctx.fill();
-    ctx.lineWidth = hover ? 3 : 2;
-    ctx.strokeStyle = hover ? '#ffd600' : 'rgba(255,255,255,0.35)';
-    ctx.stroke();
-
-    ctx.fillStyle = '#eafaf0';
-    ctx.font = 'bold 20px Segoe UI, Arial, sans-serif';
-    ctx.fillText(btn.label, btn.x + MENU_BTN_W / 2, btn.y + 30);
-
-    ctx.fillStyle = '#9fcbb0';
-    ctx.font = '11px Segoe UI, Arial, sans-serif';
-    ctx.fillText(btn.sub, btn.x + MENU_BTN_W / 2, btn.y + 52);
-  });
-
-  ctx.fillStyle = '#9fcbb0';
-  ctx.font = '12px Segoe UI, Arial, sans-serif';
-  ctx.fillText('P1: WASD move · C/V shoot', CANVAS_W / 2, 300);
-  ctx.fillText('P2 (2P mode): Arrows move · O/P shoot', CANVAS_W / 2, 320);
-  ctx.fillStyle = '#ffd600';
-  ctx.fillText('★ Grab the star every 10s for a random powerup!', CANVAS_W / 2, 342);
-  ctx.textAlign = 'start';
 }
 
 // Kick everything off
