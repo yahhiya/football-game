@@ -90,6 +90,9 @@
   A/D or Left/Right to move. W, Up, or Space to jump. J = low kick,
   K = high kick — both swing instantly on press. First to lead when the
   60-second clock runs out wins. Press R to play again after full time.
+  A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
+  a random buff: a taller goal, a speed boost, a giant player, or a freeze
+  on your opponent.
 </div>
 
 <script>
@@ -140,6 +143,35 @@ const MATCH_DURATION = 60;
 let scoreLeft = 0;
 let scoreRight = 0;
 
+/* ---------------------------------------------------------------------
+   POWER-UP STAR
+   A star spawns every STAR_SPAWN_INTERVAL seconds, either near the
+   middle of the pitch or somewhere randomly high up. Whoever kicks the
+   ball into it gets a random buff.
+   --------------------------------------------------------------------- */
+const STAR_SPAWN_INTERVAL = 10;
+const STAR_RADIUS = 15;
+const POWERUP_DURATION = 8;     // taller goal / super speed / giant
+const FREEZE_DURATION = 3;      // freeze is disabling, so keep it shorter
+const SPEED_BOOST_MULT = 1.6;
+const GIANT_SCALE = 1.7;
+const TALL_GOAL_MULT = 1.8;
+
+const POWERUP_TYPES = {
+  tallGoal: { label: 'TALLER GOAL', color: '#ffd23f', icon: '\u2B06' },
+  freeze:   { label: 'FROZE OPPONENT', color: '#7fe0ff', icon: '\u2744' },
+  speed:    { label: 'SUPER SPEED', color: '#ff9f3f', icon: '\u26A1' },
+  giant:    { label: 'GIANT MODE', color: '#c46bff', icon: '\u25CF' }
+};
+
+let star = null;
+let starSpawnTimer = STAR_SPAWN_INTERVAL;
+let goalHeightLeft = GOAL_HEIGHT;
+let goalHeightRight = GOAL_HEIGHT;
+let goalBoostTimerLeft = 0;
+let goalBoostTimerRight = 0;
+let floatingTexts = [];
+
 function startPregame() {
   gamePhase = 'pregame';
   phaseTimer = PREGAME_DURATION;
@@ -173,8 +205,8 @@ window.addEventListener('keydown', e => {
   if (MOVE_KEYS.includes(key)) e.preventDefault();
 
   if (gamePhase === 'playing') {
-    if (key === 'j') { e.preventDefault(); tryShoot(player, 'low'); }
-    if (key === 'k') { e.preventDefault(); tryShoot(player, 'high'); }
+    if (key === 'j') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
+    if (key === 'k') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
   }
   if (key === 'r' && gamePhase === 'ended') {
     e.preventDefault();
@@ -196,7 +228,8 @@ canvas.focus();
    --------------------------------------------------------------------- */
 const player = {
   x: GOAL_X_LEFT + 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
-  radius: 12, speed: 280, attackDir: 1,
+  radius: 12, baseRadius: 12, speed: 280, baseSpeed: 280, attackDir: 1,
+  speedTimer: 0, giantTimer: 0, frozenTimer: 0,
   shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
   skin: '#e3a874', hairColor: '#e8b23d', hairStyle: 'spiky', browColor: '#7a5a2a',
   eyeColor: '#3fae5c', jerseyColor: '#3fa7ff', bootColor: '#152233', bootAccent: '#3fa7ff'
@@ -204,14 +237,15 @@ const player = {
 
 const opponent = {
   x: GOAL_X_RIGHT - 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
-  radius: 12, speed: 225, attackDir: -1,
+  radius: 12, baseRadius: 12, speed: 225, baseSpeed: 225, attackDir: -1,
+  speedTimer: 0, giantTimer: 0, frozenTimer: 0,
   shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
   skin: '#d99a6c', hairColor: '#241a12', hairStyle: 'side', browColor: '#150f0a',
   eyeColor: '#8a3b3b', jerseyColor: '#ff5b5b', bootColor: '#1a1414', bootAccent: '#ff5b5b'
 };
 
 const ball = {
-  x: CANVAS_W / 2, h: 200, vx: 0, vh: 0, radius: 12, spin: 0,
+  x: CANVAS_W / 2, h: 200, vx: 0, vh: 0, radius: 12, spin: 0, lastKickedBy: null
 };
 
 // ---- Tuning ----
@@ -257,6 +291,7 @@ function update(dt) {
     if (phaseTimer <= 0) {
       gamePhase = 'playing';
       matchTimeRemaining = MATCH_DURATION;
+      kickoffHop(); // never start play with the ball dead-flat on the ground
     }
     return;
   }
@@ -266,6 +301,7 @@ function update(dt) {
     if (phaseTimer <= 0) {
       resetAfterGoal();
       gamePhase = matchTimeRemaining > 0 ? 'playing' : 'ended';
+      if (gamePhase === 'playing') kickoffHop();
     }
     return;
   }
@@ -281,13 +317,103 @@ function update(dt) {
     return;
   }
 
+  updatePowerups(dt);
+  updateStar(dt);
+
   movePlayer(dt);
   updateOpponentAI(dt);
   simulateBallSubsteps(dt);
+  checkStarCollision();
 
   handleBodyCollision(player, opponent);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
   opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
+
+  updateFloatingTexts(dt);
+}
+
+/* ---------------------------------------------------------------------
+   POWER-UP STAR — spawns every STAR_SPAWN_INTERVAL seconds at a random
+   spot (mid-pitch or high up), and grants a random buff to whoever last
+   kicked the ball once the ball touches it.
+   --------------------------------------------------------------------- */
+function updatePowerups(dt) {
+  [player, opponent].forEach(e => {
+    e.speedTimer = Math.max(0, e.speedTimer - dt);
+    e.giantTimer = Math.max(0, e.giantTimer - dt);
+    e.frozenTimer = Math.max(0, e.frozenTimer - dt);
+    e.speed = e.speedTimer > 0 ? e.baseSpeed * SPEED_BOOST_MULT : e.baseSpeed;
+    e.radius = e.giantTimer > 0 ? e.baseRadius * GIANT_SCALE : e.baseRadius;
+  });
+
+  goalBoostTimerLeft = Math.max(0, goalBoostTimerLeft - dt);
+  goalBoostTimerRight = Math.max(0, goalBoostTimerRight - dt);
+  goalHeightLeft = goalBoostTimerLeft > 0 ? GOAL_HEIGHT * TALL_GOAL_MULT : GOAL_HEIGHT;
+  goalHeightRight = goalBoostTimerRight > 0 ? GOAL_HEIGHT * TALL_GOAL_MULT : GOAL_HEIGHT;
+}
+
+function updateStar(dt) {
+  starSpawnTimer -= dt;
+  if (starSpawnTimer <= 0) {
+    spawnStar();
+    starSpawnTimer = STAR_SPAWN_INTERVAL;
+  }
+  if (star) star.spawnT += dt;
+}
+
+function spawnStar() {
+  const highMode = Math.random() < 0.5;
+  let x, h;
+  if (highMode) {
+    // higher up over the pitch, but still within reach of a strong high shot/header
+    x = GOAL_X_LEFT + 140 + Math.random() * (GOAL_X_RIGHT - GOAL_X_LEFT - 280);
+    h = 140 + Math.random() * 90;
+  } else {
+    // near the middle of the pitch, at a kickable height
+    x = CANVAS_W / 2 + (Math.random() * 160 - 80);
+    h = 70 + Math.random() * 110;
+  }
+  const types = Object.keys(POWERUP_TYPES);
+  const type = types[Math.floor(Math.random() * types.length)];
+  star = { x, h, type, radius: STAR_RADIUS, spawnT: 0 };
+}
+
+function checkStarCollision() {
+  if (!star) return;
+  const dist = Math.hypot(ball.x - star.x, ball.h - star.h);
+  if (dist < ball.radius + star.radius) {
+    if (ball.lastKickedBy) applyPowerup(ball.lastKickedBy, star.type);
+    star = null;
+  }
+}
+
+function applyPowerup(entity, type) {
+  const other = entity === player ? opponent : player;
+  if (type === 'tallGoal') {
+    if (entity.attackDir === 1) goalBoostTimerRight = POWERUP_DURATION;
+    else goalBoostTimerLeft = POWERUP_DURATION;
+  } else if (type === 'freeze') {
+    other.frozenTimer = FREEZE_DURATION;
+  } else if (type === 'speed') {
+    entity.speedTimer = POWERUP_DURATION;
+  } else if (type === 'giant') {
+    entity.giantTimer = POWERUP_DURATION;
+  }
+  spawnPowerupBanner(entity, type);
+}
+
+function spawnPowerupBanner(entity, type) {
+  const meta = POWERUP_TYPES[type];
+  floatingTexts.push({ x: entity.x, h: entity.h + 110, text: meta.label, color: meta.color, life: 1.4, maxLife: 1.4 });
+}
+
+function updateFloatingTexts(dt) {
+  for (let i = floatingTexts.length - 1; i >= 0; i--) {
+    const t = floatingTexts[i];
+    t.life -= dt;
+    t.h += dt * 26;
+    if (t.life <= 0) floatingTexts.splice(i, 1);
+  }
 }
 
 /* ---------------------------------------------------------------------
@@ -317,16 +443,19 @@ function simulateBallSubsteps(dt) {
 function movePlayer(dt) {
   updateShotTimers(player, dt);
 
+  const frozen = player.frozenTimer > 0;
   let dir = 0;
-  if (keys['a'] || keys['arrowleft']) dir -= 1;
-  if (keys['d'] || keys['arrowright']) dir += 1;
+  if (!frozen) {
+    if (keys['a'] || keys['arrowleft']) dir -= 1;
+    if (keys['d'] || keys['arrowright']) dir += 1;
+  }
 
   const targetVx = dir * player.speed;
   const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
   player.vx = moveToward(player.vx, targetVx, accel * dt);
   player.x += player.vx * dt;
 
-  if ((keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
+  if (!frozen && (keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
     player.vh = JUMP_VELOCITY;
     player.grounded = false;
   }
@@ -338,6 +467,16 @@ function movePlayer(dt) {
 
 function updateOpponentAI(dt) {
   updateShotTimers(opponent, dt);
+
+  if (opponent.frozenTimer > 0) {
+    // frozen: no input, just coast to a stop and keep falling under gravity
+    opponent.vx = moveToward(opponent.vx, 0, MOVE_DECEL * dt);
+    opponent.x += opponent.vx * dt;
+    applyGravity(opponent, dt);
+    applyKnockback(opponent, dt);
+    opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
+    return;
+  }
 
   const toBallX = ball.x - opponent.x;
   let desiredDir = 0;
@@ -390,6 +529,15 @@ function applyKnockback(entity, dt) {
   entity.x += entity.knockX * dt;
 }
 
+// Whatever state the ball settled into (it may have gone fully flat during
+// the countdown, or arrived at rest from the previous goal), every kickoff
+// should start with the ball genuinely live and in the air — not a dead
+// weight sitting on the grass that both players immediately collapse onto.
+function kickoffHop() {
+  ball.vh = 300;
+  ball.vx = (Math.random() < 0.5 ? -1 : 1) * (40 + Math.random() * 50);
+}
+
 function moveBall(dt) {
   ball.vh -= GRAVITY_BALL * dt;
 
@@ -418,16 +566,13 @@ function resolveBallWalls() {
     if (ball.vh > 0) ball.vh = -Math.abs(ball.vh) * 0.5;
   }
 
-  const inGoalOpening = ball.h < GOAL_HEIGHT;
-  if (!inGoalOpening) {
-    if (ball.x - ball.radius < GOAL_X_LEFT) {
-      ball.x = GOAL_X_LEFT + ball.radius;
-      ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
-    }
-    if (ball.x + ball.radius > GOAL_X_RIGHT) {
-      ball.x = GOAL_X_RIGHT - ball.radius;
-      ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
-    }
+  if (ball.h >= goalHeightLeft && ball.x - ball.radius < GOAL_X_LEFT) {
+    ball.x = GOAL_X_LEFT + ball.radius;
+    ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
+  }
+  if (ball.h >= goalHeightRight && ball.x + ball.radius > GOAL_X_RIGHT) {
+    ball.x = GOAL_X_RIGHT - ball.radius;
+    ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
   }
 
   const speed = Math.hypot(ball.vx, ball.vh);
@@ -476,19 +621,28 @@ function capsuleOverlap(cx, bottomH, topH, cR, kickPower) {
 }
 
 function resolveDeepestContact(entity) {
+  // Scales with entity.radius / entity.baseRadius so the "giant" power-up
+  // actually grows the hitbox, not just the artwork.
+  const scale = entity.radius / entity.baseRadius;
+  const headOffset = HEAD_OFFSET * scale;
+  const bootOffset = BOOT_OFFSET * scale;
+  const headR = HEAD_COLLISION_RADIUS * scale;
+  const bootR = BOOT_COLLISION_RADIUS * scale;
+  const bodyR = BODY_RADIUS * scale;
+
   // The capsule spans only the actual former gap (from the boot's own
   // top edge to the head's own bottom edge) rather than the full
   // boot-to-head centerline. If it overlapped the boot's own zone, its
   // larger radius would out-compete the boot's toe-slope-biased contact
   // on every deepest-penetration comparison, silently cancelling the
   // pop-up behavior near the ground — which is exactly where it matters most.
-  const bootTopEdge = entity.h + BOOT_OFFSET + BOOT_COLLISION_RADIUS;
-  const headBottomEdge = entity.h + HEAD_OFFSET - HEAD_COLLISION_RADIUS;
+  const bootTopEdge = entity.h + bootOffset + bootR;
+  const headBottomEdge = entity.h + headOffset - headR;
 
   const candidates = [
-    pointOverlap(entity.x, entity.h + HEAD_OFFSET, HEAD_COLLISION_RADIUS, 1.1, false),
-    pointOverlap(entity.x, entity.h + BOOT_OFFSET, BOOT_COLLISION_RADIUS, 1.3, true),
-    capsuleOverlap(entity.x, bootTopEdge, headBottomEdge, BODY_RADIUS, 1.15)
+    pointOverlap(entity.x, entity.h + headOffset, headR, 1.1, false),
+    pointOverlap(entity.x, entity.h + bootOffset, bootR, 1.3, true),
+    capsuleOverlap(entity.x, bootTopEdge, headBottomEdge, bodyR, 1.15)
   ];
 
   let best = null;
@@ -542,8 +696,9 @@ function checkKickImpact(entity) {
   const inActiveWindow = progress > 0.25 && progress < 0.75;
   if (!inActiveWindow) return;
 
-  const dist = Math.hypot(ball.x - entity.x, ball.h - (entity.h + BOOT_OFFSET));
-  if (dist > KICK_CONNECT_RANGE) return;
+  const scale = entity.radius / entity.baseRadius;
+  const dist = Math.hypot(ball.x - entity.x, ball.h - (entity.h + BOOT_OFFSET * scale));
+  if (dist > KICK_CONNECT_RANGE * scale) return;
 
   const speed = entity.kickType === 'low' ? LOW_SHOT_SPEED : HIGH_SHOT_SPEED;
   const lift = entity.kickType === 'low' ? LOW_SHOT_LIFT : HIGH_SHOT_LIFT;
@@ -551,6 +706,7 @@ function checkKickImpact(entity) {
   ball.vx = entity.attackDir * speed + entity.vx * 0.25;
   ball.vh = lift + entity.vh * 0.25;
   entity.kickApplied = true;
+  ball.lastKickedBy = entity;
 }
 
 function updateShotTimers(entity, dt) {
@@ -601,22 +757,34 @@ function startGoalPause(concedingSide) {
 // Concession kickoff: the ball drops closer to whoever just conceded,
 // giving them a fair first chance to clear it instead of a neutral
 // 50/50 restart every single time.
-function resetAfterGoal() {
+function resetAfterGoal(fullReset) {
   const centerX = CANVAS_W / 2;
   const bias = (GOAL_X_RIGHT - GOAL_X_LEFT) * 0.15;
   let ballX = centerX;
   if (lastConcedingSide === 'left') ballX = centerX - bias;
   else if (lastConcedingSide === 'right') ballX = centerX + bias;
 
-  ball.x = ballX; ball.h = 200; ball.vx = 0; ball.vh = 0; ball.spin = 0;
+  ball.x = ballX; ball.h = 200; ball.vx = 0; ball.vh = 0; ball.spin = 0; ball.lastKickedBy = null;
 
   player.x = GOAL_X_LEFT + 160; player.h = 0; player.vx = 0; player.vh = 0;
   player.knockX = 0; player.grounded = true; player.shotCooldown = 0;
   player.kickTimer = 0; player.kickApplied = false;
+  player.speedTimer = 0; player.giantTimer = 0; player.frozenTimer = 0;
+  player.radius = player.baseRadius; player.speed = player.baseSpeed;
 
   opponent.x = GOAL_X_RIGHT - 160; opponent.h = 0; opponent.vx = 0; opponent.vh = 0;
   opponent.knockX = 0; opponent.grounded = true; opponent.shotCooldown = 0;
   opponent.kickTimer = 0; opponent.kickApplied = false;
+  opponent.speedTimer = 0; opponent.giantTimer = 0; opponent.frozenTimer = 0;
+  opponent.radius = opponent.baseRadius; opponent.speed = opponent.baseSpeed;
+
+  goalBoostTimerLeft = 0; goalBoostTimerRight = 0;
+  goalHeightLeft = GOAL_HEIGHT; goalHeightRight = GOAL_HEIGHT;
+  floatingTexts = [];
+
+  // A goal being scored doesn't despawn an uncollected star — it stays on
+  // the pitch for the next kickoff. Only a full match restart clears it.
+  if (fullReset) star = null;
 }
 
 function restartMatch() {
@@ -624,7 +792,8 @@ function restartMatch() {
   document.getElementById('scoreLeft').textContent = '0';
   document.getElementById('scoreRight').textContent = '0';
   lastConcedingSide = null;
-  resetAfterGoal();
+  resetAfterGoal(true);
+  starSpawnTimer = STAR_SPAWN_INTERVAL;
   startPregame();
 }
 
@@ -637,12 +806,86 @@ function render() {
   drawPitch();
   drawGoal(true);
   drawGoal(false);
+  if (star) drawStar(star);
   drawEntitiesSorted();
+  drawFloatingTexts();
   drawTimerBadge();
+  drawStarCountdown();
 
   if (gamePhase === 'pregame') drawPregameOverlay();
   if (gamePhase === 'goalPause') drawGoalBanner();
   if (gamePhase === 'ended') drawEndedOverlay();
+}
+
+function drawStar(s) {
+  const meta = POWERUP_TYPES[s.type];
+  const bob = Math.sin(s.spawnT * 3) * 6;
+  const screenY = groundToScreenY(s.h) - bob;
+  const pulse = 1 + Math.sin(s.spawnT * 5) * 0.12;
+  const r = s.radius * pulse;
+
+  ctx.save();
+  ctx.translate(s.x, screenY);
+
+  const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 2.4);
+  glow.addColorStop(0, meta.color + 'aa');
+  glow.addColorStop(1, meta.color + '00');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 2.4, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const angle = -Math.PI / 2 + i * (Math.PI / 5);
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const px = Math.cos(angle) * rad, py = Math.sin(angle) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = meta.color;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.stroke();
+
+  ctx.font = `${Math.round(r * 0.9)}px Segoe UI, Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillText(meta.icon, 0, 1);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.restore();
+}
+
+function drawFloatingTexts() {
+  floatingTexts.forEach(t => {
+    const alpha = clamp(t.life / t.maxLife, 0, 1);
+    const screenY = groundToScreenY(t.h);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = 'bold 15px Segoe UI, Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    ctx.strokeText(t.text, t.x, screenY);
+    ctx.fillStyle = t.color;
+    ctx.fillText(t.text, t.x, screenY);
+    ctx.restore();
+  });
+  ctx.textAlign = 'start';
+}
+
+function drawStarCountdown() {
+  if (gamePhase !== 'playing' || star) return;
+  const secs = Math.ceil(starSpawnTimer);
+  ctx.font = '12px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = 'rgba(234,250,240,0.7)';
+  ctx.textAlign = 'center';
+  ctx.fillText(`\u2B50 next power-up in ${secs}s`, CANVAS_W / 2, 62);
+  ctx.textAlign = 'start';
 }
 
 function drawSky() {
@@ -693,11 +936,13 @@ function drawPitch() {
 }
 
 function drawGoal(isLeft) {
+  const goalH = isLeft ? goalHeightLeft : goalHeightRight;
+  const boosted = isLeft ? goalBoostTimerLeft > 0 : goalBoostTimerRight > 0;
   const frontX = isLeft ? GOAL_X_LEFT : GOAL_X_RIGHT;
   const backX = isLeft ? GOAL_X_LEFT - GOAL_NET_DEPTH : GOAL_X_RIGHT + GOAL_NET_DEPTH;
   const leftX = Math.min(frontX, backX);
   const rightX = Math.max(frontX, backX);
-  const topY = GROUND_Y - GOAL_HEIGHT;
+  const topY = GROUND_Y - goalH;
 
   ctx.strokeStyle = 'rgba(255,255,255,0.4)';
   ctx.lineWidth = 1;
@@ -709,8 +954,8 @@ function drawGoal(isLeft) {
     ctx.beginPath(); ctx.moveTo(leftX, y); ctx.lineTo(rightX, y); ctx.stroke();
   }
 
-  ctx.strokeStyle = '#eafaf0';
-  ctx.lineWidth = 4.5;
+  ctx.strokeStyle = boosted ? '#ffd23f' : '#eafaf0';
+  ctx.lineWidth = boosted ? 6 : 4.5;
   ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(frontX, GROUND_Y); ctx.lineTo(frontX, topY); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(backX, GROUND_Y); ctx.lineTo(backX, topY); ctx.stroke();
@@ -892,19 +1137,33 @@ function drawBall(entity) {
 }
 
 function drawCharacter(entity) {
+  const scale = entity.radius / entity.baseRadius;
   drawGroundShadow(entity.x, entity.h, entity.radius * 1.3);
 
   const baseY = groundToScreenY(entity.h);
-  const bootY = baseY - BOOT_OFFSET;
-  const headY = baseY - HEAD_OFFSET;
+  const bootY = baseY - BOOT_OFFSET * scale;
+  const headY = baseY - HEAD_OFFSET * scale;
+
+  if (entity.frozenTimer > 0) drawFrostAura(entity, baseY);
 
   drawBoot(entity.x, bootY, entity);
   drawTorso(entity.x, bootY, headY, entity);
   drawHead(entity.x, headY, entity);
 }
 
+function drawFrostAura(entity, baseY) {
+  ctx.save();
+  ctx.globalAlpha = 0.3 + Math.sin(performance.now() / 150) * 0.1;
+  ctx.beginPath();
+  ctx.ellipse(entity.x, baseY - 40, entity.radius * 2.6, entity.radius * 3.4, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#8fe8ff';
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
-  const width = BODY_RADIUS * 1.7;
+  const scale = entity.radius / entity.baseRadius;
+  const width = BODY_RADIUS * scale * 1.7;
   const top = headScreenY + entity.radius * 0.9;
   const bottom = bootScreenY - entity.radius * 0.15;
 
