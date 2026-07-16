@@ -113,7 +113,9 @@
   or M for the mode menu, after full time.
   A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
   a random buff: a taller goal, a speed boost, a giant player, or a freeze
-  on your opponent.
+  on your opponent. Camping in front of your own goal for too long is
+  risky too — a ⚠ appears after 5 seconds, and staying past 7 gets you
+  frozen as a penalty.
 </div>
 
 <script>
@@ -295,6 +297,17 @@ const SPEED_BOOST_MULT = 1.6;
 const GIANT_SCALE = 1.7;
 const TALL_GOAL_MULT = 1.8;
 
+/* ---------------------------------------------------------------------
+   ANTI-CAMPING — parking right in front of your own goal indefinitely
+   isn't allowed. Standing inside your own goal zone for CAMP_WARNING_TIME
+   seconds shows a warning; staying past CAMP_FREEZE_TIME freezes you as
+   a penalty, same as the freeze power-up.
+   --------------------------------------------------------------------- */
+const CAMP_ZONE_WIDTH = 130;   // how far out from the goal line counts as "camping"
+const CAMP_WARNING_TIME = 5;   // seconds before the warning icon appears
+const CAMP_FREEZE_TIME = 7;    // seconds before the penalty freeze actually lands
+const CAMP_FREEZE_DURATION = 3;
+
 const POWERUP_TYPES = {
   tallGoal: { label: 'TALLER GOAL', color: '#ffd23f', icon: '\u2B06' },
   freeze:   { label: 'FROZE OPPONENT', color: '#7fe0ff', icon: '\u2744' },
@@ -388,7 +401,7 @@ canvas.focus();
 const player = {
   x: GOAL_X_LEFT + 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
   radius: 12, baseRadius: 12, speed: 280, baseSpeed: 280, attackDir: 1,
-  speedTimer: 0, giantTimer: 0, frozenTimer: 0,
+  speedTimer: 0, giantTimer: 0, frozenTimer: 0, campTimer: 0,
   shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
   skin: '#e3a874', hairColor: '#e8b23d', hairStyle: 'spiky', browColor: '#7a5a2a',
   eyeColor: '#3fae5c', jerseyColor: '#3fa7ff', bootColor: '#152233', bootAccent: '#3fa7ff'
@@ -397,7 +410,7 @@ const player = {
 const opponent = {
   x: GOAL_X_RIGHT - 160, h: 0, vx: 0, vh: 0, grounded: true, knockX: 0,
   radius: 12, baseRadius: 12, speed: 225, baseSpeed: 225, attackDir: -1,
-  speedTimer: 0, giantTimer: 0, frozenTimer: 0,
+  speedTimer: 0, giantTimer: 0, frozenTimer: 0, campTimer: 0,
   shotCooldown: 0, kickTimer: 0, kickType: null, kickApplied: false,
   skin: '#d99a6c', hairColor: '#241a12', hairStyle: 'side', browColor: '#150f0a',
   eyeColor: '#8a3b3b', jerseyColor: '#ff5b5b', bootColor: '#1a1414', bootAccent: '#ff5b5b'
@@ -484,6 +497,7 @@ function update(dt) {
 
   updatePowerups(dt);
   updateStar(dt);
+  updateCamping(dt);
 
   movePlayer(dt);
   if (gameMode === 'twoPlayer') movePlayer2(dt); else updateOpponentAI(dt);
@@ -517,6 +531,34 @@ function updatePowerups(dt) {
   goalBoostTimerRight = Math.max(0, goalBoostTimerRight - dt);
   goalHeightLeft = goalBoostTimerLeft > 0 ? GOAL_HEIGHT * TALL_GOAL_MULT : GOAL_HEIGHT;
   goalHeightRight = goalBoostTimerRight > 0 ? GOAL_HEIGHT * TALL_GOAL_MULT : GOAL_HEIGHT;
+}
+
+function updateCamping(dt) {
+  const playerCamping = player.x < GOAL_X_LEFT + CAMP_ZONE_WIDTH;
+  const opponentCamping = opponent.x > GOAL_X_RIGHT - CAMP_ZONE_WIDTH;
+
+  player.campTimer = playerCamping ? player.campTimer + dt : 0;
+  opponent.campTimer = opponentCamping ? opponent.campTimer + dt : 0;
+
+  if (player.campTimer >= CAMP_FREEZE_TIME) applyCampingFreeze(player);
+  if (opponent.campTimer >= CAMP_FREEZE_TIME) applyCampingFreeze(opponent);
+}
+
+function applyCampingFreeze(entity) {
+  entity.frozenTimer = Math.max(entity.frozenTimer, CAMP_FREEZE_DURATION);
+  entity.campTimer = 0;
+
+  // Freezing alone wasn't enough of a deterrent since you'd still be
+  // standing right on the goal line once it wore off — so also boot the
+  // camper out to the middle of the pitch, away from either goal mouth.
+  entity.x = CANVAS_W / 2 + (entity === player ? -30 : 30);
+  entity.vx = 0;
+  entity.vh = 0;
+  entity.knockX = 0;
+
+  floatingTexts.push({ x: entity.x, h: entity.h + 110, text: 'FROZEN — NO CAMPING!', color: '#7fe0ff', life: 1.4, maxLife: 1.4 });
+  playTone({ freq: 700, freqEnd: 200, duration: 0.3, type: 'sawtooth', volume: 0.16 });
+  playTone({ freq: 500, freqEnd: 150, duration: 0.3, type: 'sawtooth', volume: 0.14, delay: 0.08 });
 }
 
 function updateStar(dt) {
@@ -989,13 +1031,13 @@ function resetAfterGoal(fullReset) {
   player.x = GOAL_X_LEFT + 160; player.h = 0; player.vx = 0; player.vh = 0;
   player.knockX = 0; player.grounded = true; player.shotCooldown = 0;
   player.kickTimer = 0; player.kickApplied = false;
-  player.speedTimer = 0; player.giantTimer = 0; player.frozenTimer = 0;
+  player.speedTimer = 0; player.giantTimer = 0; player.frozenTimer = 0; player.campTimer = 0;
   player.radius = player.baseRadius; player.speed = player.baseSpeed;
 
   opponent.x = GOAL_X_RIGHT - 160; opponent.h = 0; opponent.vx = 0; opponent.vh = 0;
   opponent.knockX = 0; opponent.grounded = true; opponent.shotCooldown = 0;
   opponent.kickTimer = 0; opponent.kickApplied = false;
-  opponent.speedTimer = 0; opponent.giantTimer = 0; opponent.frozenTimer = 0;
+  opponent.speedTimer = 0; opponent.giantTimer = 0; opponent.frozenTimer = 0; opponent.campTimer = 0;
   opponent.radius = opponent.baseRadius; opponent.speed = opponent.baseSpeed;
 
   goalBoostTimerLeft = 0; goalBoostTimerRight = 0;
@@ -1433,6 +1475,7 @@ function drawCharacter(entity) {
   const headY = baseY - HEAD_OFFSET * scale;
 
   if (entity.frozenTimer > 0) drawFrostAura(entity, baseY);
+  else if (entity.campTimer > CAMP_WARNING_TIME) drawCampWarning(entity, headY);
 
   drawBoot(entity.x, bootY, entity);
   drawTorso(entity.x, bootY, headY, entity);
@@ -1447,6 +1490,24 @@ function drawFrostAura(entity, baseY) {
   ctx.fillStyle = '#8fe8ff';
   ctx.fill();
   ctx.restore();
+}
+
+function drawCampWarning(entity, headY) {
+  // Pulses faster as the freeze deadline gets closer, so it reads as an
+  // escalating countdown rather than a flat "warning" that never changes.
+  const progress = clamp((entity.campTimer - CAMP_WARNING_TIME) / (CAMP_FREEZE_TIME - CAMP_WARNING_TIME), 0, 1);
+  const pulseSpeed = 90 - progress * 50;
+  const alpha = 0.55 + Math.sin(performance.now() / pulseSpeed) * 0.35;
+
+  ctx.save();
+  ctx.globalAlpha = clamp(alpha, 0.15, 1);
+  ctx.font = 'bold 22px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#ff5b5b';
+  ctx.fillText('\u26A0', entity.x, headY - entity.radius * 2.6);
+  ctx.restore();
+  ctx.textAlign = 'start';
 }
 
 function drawTorso(cx, bootScreenY, headScreenY, entity) {
