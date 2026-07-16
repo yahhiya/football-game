@@ -45,6 +45,20 @@
   .score-block.red  { background: linear-gradient(160deg, #ff5b5b, #7a1a1a); }
   .score-num { font-size: 24px; }
 
+  #muteBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    background: rgba(255,255,255,0.06);
+    border: none;
+    border-left: 1px solid rgba(255,255,255,0.15);
+    color: #eafaf0;
+    font-size: 18px;
+    cursor: pointer;
+  }
+  #muteBtn:hover { background: rgba(255,255,255,0.14); }
+
   #instructions {
     margin-top: 8px;
     font-size: 13px;
@@ -79,6 +93,7 @@
 <div id="hud">
   <div class="score-block blue">BLUE <span class="score-num" id="scoreLeft">0</span></div>
   <div class="score-block red">RED <span class="score-num" id="scoreRight">0</span></div>
+  <button id="muteBtn" title="Toggle sound">🔊</button>
 </div>
 
 <div id="arcade-frame">
@@ -122,6 +137,118 @@ function moveToward(current, target, maxDelta) {
   if (Math.abs(target - current) <= maxDelta) return target;
   return current + Math.sign(target - current) * maxDelta;
 }
+
+/* ---------------------------------------------------------------------
+   SOUND — small synthesized SFX via the Web Audio API. No external audio
+   files, so everything is generated on the fly with oscillators/noise.
+   The AudioContext is created lazily on first user interaction, since
+   browsers block audio before a gesture. This has to come before the
+   match state machine below, because startPregame() (called immediately
+   at load) fires a whistle sound as soon as the script runs.
+   --------------------------------------------------------------------- */
+let audioCtx = null;
+let soundEnabled = true;
+
+function ensureAudio() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) audioCtx = new Ctx();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone({ freq = 440, duration = 0.15, type = 'sine', volume = 0.22, freqEnd = null, delay = 0 }) {
+  if (!soundEnabled || !audioCtx) return;
+  const t0 = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (freqEnd !== null) osc.frequency.exponentialRampToValueAtTime(Math.max(freqEnd, 1), t0 + duration);
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(t0);
+  osc.stop(t0 + duration + 0.03);
+}
+
+function playNoise({ duration = 0.2, volume = 0.18, delay = 0 }) {
+  if (!soundEnabled || !audioCtx) return;
+  const t0 = audioCtx.currentTime + delay;
+  const bufferSize = Math.max(1, Math.floor(audioCtx.sampleRate * duration));
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + duration);
+  noise.connect(gain);
+  gain.connect(audioCtx.destination);
+  noise.start(t0);
+}
+
+function sfxKick(type) {
+  playTone({ freq: type === 'high' ? 340 : 250, freqEnd: type === 'high' ? 120 : 85, duration: 0.11, type: 'square', volume: 0.2 });
+  playNoise({ duration: 0.05, volume: 0.14 });
+}
+
+function sfxJump() {
+  playTone({ freq: 300, freqEnd: 560, duration: 0.13, type: 'triangle', volume: 0.13 });
+}
+
+function sfxBounce(intensity) {
+  const v = clamp(intensity, 0, 1);
+  playTone({ freq: 170 + v * 70, freqEnd: 90, duration: 0.07, type: 'sine', volume: 0.05 + v * 0.09 });
+}
+
+function sfxPost() {
+  playTone({ freq: 950, freqEnd: 480, duration: 0.09, type: 'square', volume: 0.14 });
+}
+
+function sfxBump() {
+  playTone({ freq: 150, freqEnd: 80, duration: 0.07, type: 'sine', volume: 0.1 });
+}
+
+function sfxGoal() {
+  [0, 0.12, 0.24].forEach((delay, i) => {
+    playTone({ freq: 520 + i * 160, duration: 0.18, type: 'square', volume: 0.22, delay });
+  });
+  playNoise({ duration: 0.45, volume: 0.1 });
+}
+
+function sfxWhistleStart() {
+  playTone({ freq: 1250, duration: 0.3, type: 'square', volume: 0.16 });
+}
+
+function sfxWhistleEnd() {
+  playTone({ freq: 950, freqEnd: 480, duration: 0.55, type: 'square', volume: 0.18 });
+}
+
+function sfxKickoffGo() {
+  playTone({ freq: 660, freqEnd: 990, duration: 0.16, type: 'triangle', volume: 0.2 });
+}
+
+const POWERUP_SFX_NOTES = {
+  tallGoal: [440, 660, 880],
+  freeze: [880, 660],
+  speed: [440, 660, 880, 1100],
+  giant: [220, 330, 260]
+};
+
+function sfxPowerup(type) {
+  const seq = POWERUP_SFX_NOTES[type] || [440, 660];
+  seq.forEach((freq, i) => playTone({ freq, duration: 0.11, type: 'triangle', volume: 0.16, delay: i * 0.08 }));
+}
+
+const muteBtn = document.getElementById('muteBtn');
+muteBtn.addEventListener('click', () => {
+  ensureAudio();
+  soundEnabled = !soundEnabled;
+  muteBtn.textContent = soundEnabled ? '\uD83D\uDD0A' : '\uD83D\uDD07';
+});
 
 /* ---------------------------------------------------------------------
    MATCH STATE MACHINE
@@ -175,6 +302,7 @@ let floatingTexts = [];
 function startPregame() {
   gamePhase = 'pregame';
   phaseTimer = PREGAME_DURATION;
+  sfxWhistleStart();
 }
 startPregame();
 
@@ -219,7 +347,7 @@ window.addEventListener('keyup', e => {
 
 canvas.tabIndex = 0;
 canvas.style.outline = 'none';
-canvas.addEventListener('click', () => canvas.focus());
+canvas.addEventListener('click', () => { canvas.focus(); ensureAudio(); });
 window.addEventListener('load', () => canvas.focus());
 canvas.focus();
 
@@ -292,6 +420,7 @@ function update(dt) {
       gamePhase = 'playing';
       matchTimeRemaining = MATCH_DURATION;
       kickoffHop(); // never start play with the ball dead-flat on the ground
+      sfxKickoffGo();
     }
     return;
   }
@@ -301,7 +430,7 @@ function update(dt) {
     if (phaseTimer <= 0) {
       resetAfterGoal();
       gamePhase = matchTimeRemaining > 0 ? 'playing' : 'ended';
-      if (gamePhase === 'playing') kickoffHop();
+      if (gamePhase === 'playing') { kickoffHop(); sfxKickoffGo(); }
     }
     return;
   }
@@ -314,6 +443,7 @@ function update(dt) {
   matchTimeRemaining = Math.max(0, matchTimeRemaining - dt);
   if (matchTimeRemaining <= 0) {
     gamePhase = 'ended';
+    sfxWhistleEnd();
     return;
   }
 
@@ -338,6 +468,8 @@ function update(dt) {
    kicked the ball once the ball touches it.
    --------------------------------------------------------------------- */
 function updatePowerups(dt) {
+  bodyBumpCooldown = Math.max(0, bodyBumpCooldown - dt);
+
   [player, opponent].forEach(e => {
     e.speedTimer = Math.max(0, e.speedTimer - dt);
     e.giantTimer = Math.max(0, e.giantTimer - dt);
@@ -400,6 +532,7 @@ function applyPowerup(entity, type) {
     entity.giantTimer = POWERUP_DURATION;
   }
   spawnPowerupBanner(entity, type);
+  sfxPowerup(type);
 }
 
 function spawnPowerupBanner(entity, type) {
@@ -458,6 +591,7 @@ function movePlayer(dt) {
   if (!frozen && (keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
     player.vh = JUMP_VELOCITY;
     player.grounded = false;
+    sfxJump();
   }
 
   applyGravity(player, dt);
@@ -501,6 +635,7 @@ function updateOpponentAI(dt) {
   if (ballIsClose && ballIsUp && opponent.grounded) {
     opponent.vh = JUMP_VELOCITY;
     opponent.grounded = false;
+    sfxJump();
   }
 
   const decisionDist = Math.hypot(ball.x - opponent.x, ball.h - (opponent.h + BOOT_OFFSET));
@@ -558,7 +693,11 @@ function moveBall(dt) {
 function resolveBallWalls() {
   if (ball.h < 0) {
     ball.h = 0;
-    if (ball.vh < 0) ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
+    if (ball.vh < 0) {
+      const impactSpeed = Math.abs(ball.vh);
+      ball.vh = -ball.vh * BALL_GROUND_RESTITUTION;
+      if (impactSpeed > 90) sfxBounce(impactSpeed / 700);
+    }
     if (Math.abs(ball.vh) < BALL_SETTLE_THRESHOLD) ball.vh = 0;
   }
   if (ball.h > CEILING_H) {
@@ -568,10 +707,12 @@ function resolveBallWalls() {
 
   if (ball.h >= goalHeightLeft && ball.x - ball.radius < GOAL_X_LEFT) {
     ball.x = GOAL_X_LEFT + ball.radius;
+    if (ball.vx < -40) sfxPost();
     ball.vx = Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
   }
   if (ball.h >= goalHeightRight && ball.x + ball.radius > GOAL_X_RIGHT) {
     ball.x = GOAL_X_RIGHT - ball.radius;
+    if (ball.vx > 40) sfxPost();
     ball.vx = -Math.abs(ball.vx) * BALL_WALL_RESTITUTION;
   }
 
@@ -707,12 +848,15 @@ function checkKickImpact(entity) {
   ball.vh = lift + entity.vh * 0.25;
   entity.kickApplied = true;
   ball.lastKickedBy = entity;
+  sfxKick(entity.kickType);
 }
 
 function updateShotTimers(entity, dt) {
   entity.shotCooldown = Math.max(0, entity.shotCooldown - dt);
   entity.kickTimer = Math.max(0, entity.kickTimer - dt);
 }
+
+let bodyBumpCooldown = 0;
 
 function handleBodyCollision(a, b) {
   const dx = b.x - a.x;
@@ -729,6 +873,11 @@ function handleBodyCollision(a, b) {
     const KNOCK_STRENGTH = 0.5;
     b.knockX += dir * Math.abs(a.vx) * KNOCK_STRENGTH;
     a.knockX -= dir * Math.abs(b.vx) * KNOCK_STRENGTH;
+
+    if (bodyBumpCooldown <= 0 && Math.abs(a.vx) + Math.abs(b.vx) > 80) {
+      sfxBump();
+      bodyBumpCooldown = 0.25;
+    }
   }
 }
 
@@ -737,12 +886,14 @@ function handleGoals() {
     scoreRight++;
     document.getElementById('scoreRight').textContent = scoreRight;
     startGoalPause('left');
+    sfxGoal();
     return true;
   }
   if (ball.x - ball.radius > GOAL_X_RIGHT) {
     scoreLeft++;
     document.getElementById('scoreLeft').textContent = scoreLeft;
     startGoalPause('right');
+    sfxGoal();
     return true;
   }
   return false;
