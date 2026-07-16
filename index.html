@@ -101,10 +101,16 @@
 </div>
 
 <div id="instructions">
-  <strong>Click the field once to give it keyboard focus.</strong>
-  A/D or Left/Right to move. W, Up, or Space to jump. J = low kick,
-  K = high kick — both swing instantly on press. First to lead when the
-  60-second clock runs out wins. Press R to play again after full time.
+  <strong>Click the field once to give it keyboard focus,</strong> then press
+  1 or 2 on the mode menu to start.
+  <br>
+  <strong>1 Player (vs AI):</strong> WASD or Arrows to move, J = low kick, K = high kick.
+  <br>
+  <strong>2 Player:</strong> Player 1 — WASD to move, C = low kick, V = high kick.
+  Player 2 — Arrow keys to move, O = low kick, P = high kick.
+  <br>
+  First to lead when the 60-second clock runs out wins. Press R to play again,
+  or M for the mode menu, after full time.
   A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
   a random buff: a taller goal, a speed boost, a giant player, or a freeze
   on your opponent.
@@ -143,8 +149,8 @@ function moveToward(current, target, maxDelta) {
    files, so everything is generated on the fly with oscillators/noise.
    The AudioContext is created lazily on first user interaction, since
    browsers block audio before a gesture. This has to come before the
-   match state machine below, because startPregame() (called immediately
-   at load) fires a whistle sound as soon as the script runs.
+   match state machine below, since startPregame() (fired once the player
+   picks a mode from the menu) plays a whistle sound.
    --------------------------------------------------------------------- */
 let audioCtx = null;
 let soundEnabled = true;
@@ -252,16 +258,21 @@ muteBtn.addEventListener('click', () => {
 
 /* ---------------------------------------------------------------------
    MATCH STATE MACHINE
-   gamePhase moves through: pregame -> playing -> (goalPause -> playing)*
-   -> ended -> (restart) -> pregame
+   gamePhase moves through: menu -> pregame -> playing -> (goalPause ->
+   playing)* -> ended -> (restart) -> pregame
    Only 'playing' runs full player/AI/collision physics; the others are
    deliberately restricted so a countdown, a goal celebration, or a
    finished match can't be interrupted or skipped by input.
    --------------------------------------------------------------------- */
-let gamePhase = 'pregame';
+let gamePhase = 'menu';
 let phaseTimer = 0;
 let matchTimeRemaining = 0;
 let lastConcedingSide = null; // 'left' | 'right' — who to favor on the next kickoff
+
+// 'ai' (single player vs bot) or 'twoPlayer' (both humans). Chosen from the
+// menu before the first kickoff; controls and the opponent's brain both key
+// off this.
+let gameMode = null;
 
 const PREGAME_DURATION = 3.6;
 const GOAL_PAUSE_DURATION = 1.4;
@@ -304,7 +315,11 @@ function startPregame() {
   phaseTimer = PREGAME_DURATION;
   sfxWhistleStart();
 }
-startPregame();
+
+function chooseMode(mode) {
+  gameMode = mode;
+  startPregame();
+}
 
 /* ---------------------------------------------------------------------
    GAME LOOP
@@ -332,13 +347,29 @@ window.addEventListener('keydown', e => {
   keys[key] = true;
   if (MOVE_KEYS.includes(key)) e.preventDefault();
 
+  if (gamePhase === 'menu') {
+    if (key === '1') { e.preventDefault(); chooseMode('ai'); }
+    if (key === '2') { e.preventDefault(); chooseMode('twoPlayer'); }
+  }
+
   if (gamePhase === 'playing') {
-    if (key === 'j') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
-    if (key === 'k') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
+    if (gameMode === 'twoPlayer') {
+      if (key === 'c') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
+      if (key === 'v') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
+      if (key === 'o') { e.preventDefault(); if (opponent.frozenTimer <= 0) tryShoot(opponent, 'low'); }
+      if (key === 'p') { e.preventDefault(); if (opponent.frozenTimer <= 0) tryShoot(opponent, 'high'); }
+    } else {
+      if (key === 'j') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
+      if (key === 'k') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
+    }
   }
   if (key === 'r' && gamePhase === 'ended') {
     e.preventDefault();
     restartMatch();
+  }
+  if (key === 'm' && gamePhase === 'ended') {
+    e.preventDefault();
+    returnToMenu();
   }
 });
 window.addEventListener('keyup', e => {
@@ -413,6 +444,10 @@ const HIGH_SHOT_SPEED = 360, HIGH_SHOT_LIFT = 660;
    UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
+  if (gamePhase === 'menu') {
+    return;
+  }
+
   if (gamePhase === 'pregame') {
     phaseTimer -= dt;
     moveBall(dt); // let it visibly drop in during the countdown
@@ -451,7 +486,7 @@ function update(dt) {
   updateStar(dt);
 
   movePlayer(dt);
-  updateOpponentAI(dt);
+  if (gameMode === 'twoPlayer') movePlayer2(dt); else updateOpponentAI(dt);
   simulateBallSubsteps(dt);
   checkStarCollision();
 
@@ -577,10 +612,11 @@ function movePlayer(dt) {
   updateShotTimers(player, dt);
 
   const frozen = player.frozenTimer > 0;
+  const arrowsAreFree = gameMode !== 'twoPlayer'; // in 2P mode, arrows belong to player 2
   let dir = 0;
   if (!frozen) {
-    if (keys['a'] || keys['arrowleft']) dir -= 1;
-    if (keys['d'] || keys['arrowright']) dir += 1;
+    if (keys['a'] || (arrowsAreFree && keys['arrowleft'])) dir -= 1;
+    if (keys['d'] || (arrowsAreFree && keys['arrowright'])) dir += 1;
   }
 
   const targetVx = dir * player.speed;
@@ -588,7 +624,7 @@ function movePlayer(dt) {
   player.vx = moveToward(player.vx, targetVx, accel * dt);
   player.x += player.vx * dt;
 
-  if (!frozen && (keys['w'] || keys['arrowup'] || keys[' ']) && player.grounded) {
+  if (!frozen && (keys['w'] || (arrowsAreFree && keys['arrowup']) || keys[' ']) && player.grounded) {
     player.vh = JUMP_VELOCITY;
     player.grounded = false;
     sfxJump();
@@ -597,6 +633,34 @@ function movePlayer(dt) {
   applyGravity(player, dt);
   applyKnockback(player, dt);
   player.x = clamp(player.x, GOAL_X_LEFT + player.radius, GOAL_X_RIGHT - player.radius);
+}
+
+// Human-controlled player 2 (two-player mode only) — mirrors movePlayer but
+// reads the arrow keys and drives the opponent entity instead of the AI.
+function movePlayer2(dt) {
+  updateShotTimers(opponent, dt);
+
+  const frozen = opponent.frozenTimer > 0;
+  let dir = 0;
+  if (!frozen) {
+    if (keys['arrowleft']) dir -= 1;
+    if (keys['arrowright']) dir += 1;
+  }
+
+  const targetVx = dir * opponent.speed;
+  const accel = dir !== 0 ? MOVE_ACCEL : MOVE_DECEL;
+  opponent.vx = moveToward(opponent.vx, targetVx, accel * dt);
+  opponent.x += opponent.vx * dt;
+
+  if (!frozen && keys['arrowup'] && opponent.grounded) {
+    opponent.vh = JUMP_VELOCITY;
+    opponent.grounded = false;
+    sfxJump();
+  }
+
+  applyGravity(opponent, dt);
+  applyKnockback(opponent, dt);
+  opponent.x = clamp(opponent.x, GOAL_X_LEFT + opponent.radius, GOAL_X_RIGHT - opponent.radius);
 }
 
 function updateOpponentAI(dt) {
@@ -802,6 +866,11 @@ function resolveDeepestContact(entity) {
 
   ball.vx = reflectedVx * BALL_COLLISION_RESTITUTION + best.responseNx * entitySpeed * best.kickPower + entity.vx * 0.35;
   ball.vh = reflectedVh * BALL_COLLISION_RESTITUTION + best.responseNh * entitySpeed * best.kickPower + entity.vh * 0.35;
+  // Any real touch (header, dribble, boot nudge) counts toward star credit —
+  // not just a deliberate J/K kick-swing (see checkKickImpact) — otherwise
+  // the AI, which mostly moves the ball this way, would rarely get credit
+  // for sending the ball into a power-up star.
+  ball.lastKickedBy = entity;
   return true;
 }
 
@@ -948,6 +1017,17 @@ function restartMatch() {
   startPregame();
 }
 
+function returnToMenu() {
+  scoreLeft = 0; scoreRight = 0;
+  document.getElementById('scoreLeft').textContent = '0';
+  document.getElementById('scoreRight').textContent = '0';
+  lastConcedingSide = null;
+  resetAfterGoal(true);
+  starSpawnTimer = STAR_SPAWN_INTERVAL;
+  gameMode = null;
+  gamePhase = 'menu';
+}
+
 /* ---------------------------------------------------------------------
    RENDER
    --------------------------------------------------------------------- */
@@ -963,9 +1043,62 @@ function render() {
   drawTimerBadge();
   drawStarCountdown();
 
+  if (gamePhase === 'menu') drawModeMenu();
   if (gamePhase === 'pregame') drawPregameOverlay();
   if (gamePhase === 'goalPause') drawGoalBanner();
   if (gamePhase === 'ended') drawEndedOverlay();
+}
+
+function drawModeMenu() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 34px Segoe UI, Arial, sans-serif';
+  ctx.fillText('Choose a mode', CANVAS_W / 2, CANVAS_H / 2 - 108);
+
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', '1 Player — vs AI', 'Move: WASD or Arrows   Kick: J / K');
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', '2 Player', 'P1: WASD + C/V     P2: Arrows + O/P');
+
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMenuOption(cx, cy, key, title, subtitle) {
+  const w = 460, h = 74;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1.5;
+  roundRect(cx - w / 2, cy - h / 2, w, h, 10);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 26px Segoe UI, Arial, sans-serif';
+  ctx.fillText(key, cx - w / 2 + 30, cy);
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 20px Segoe UI, Arial, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(title, cx - w / 2 + 60, cy - 12);
+
+  ctx.fillStyle = '#9fcbb0';
+  ctx.font = '13px Segoe UI, Arial, sans-serif';
+  ctx.fillText(subtitle, cx - w / 2 + 60, cy + 14);
+  ctx.textAlign = 'center';
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 function drawStar(s) {
@@ -1192,13 +1325,17 @@ function drawEndedOverlay() {
   ctx.font = 'bold 42px Segoe UI, Arial, sans-serif';
   ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 30);
 
-  const result = scoreLeft > scoreRight ? 'You Win!' : scoreLeft < scoreRight ? 'AI Wins' : 'Draw!';
+  const result = scoreLeft === scoreRight
+    ? 'Draw!'
+    : gameMode === 'twoPlayer'
+      ? (scoreLeft > scoreRight ? 'Blue Wins!' : 'Red Wins!')
+      : (scoreLeft > scoreRight ? 'You Win!' : 'AI Wins');
   ctx.font = 'bold 24px Segoe UI, Arial, sans-serif';
   ctx.fillText(result, CANVAS_W / 2, CANVAS_H / 2 + 14);
 
   ctx.font = '15px Segoe UI, Arial, sans-serif';
   ctx.fillStyle = '#9fcbb0';
-  ctx.fillText('Press R to play again', CANVAS_W / 2, CANVAS_H / 2 + 48);
+  ctx.fillText('Press R to play again, or M for the mode menu', CANVAS_W / 2, CANVAS_H / 2 + 48);
 
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
