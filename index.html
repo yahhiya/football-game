@@ -109,8 +109,13 @@
   <strong>2 Player:</strong> Player 1 — WASD to move, C = low kick, V = high kick.
   Player 2 — Arrow keys to move, O = low kick, P = high kick.
   <br>
-  First to lead when the 60-second clock runs out wins. Press R to play again,
-  or M for the mode menu, after full time.
+  First to lead when the 60-second clock runs out wins. If it's level, you
+  get 30 seconds of extra time; still level after that, and it comes down
+  to a penalty shootout — a face-on view where the shooter moves the
+  reticle to a zone (left/right to pick a side, up/down for low or a
+  harder-to-stop high corner) and kicks, while the keeper moves the same
+  way to dive toward a side and reach high or stay low. Press R to play
+  again, or M for the mode menu, after full time.
   A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
   a random buff: a taller goal, a speed boost, a giant player, or a freeze
   on your opponent. Camping in front of your own goal for too long is
@@ -261,10 +266,13 @@ muteBtn.addEventListener('click', () => {
 /* ---------------------------------------------------------------------
    MATCH STATE MACHINE
    gamePhase moves through: menu -> pregame -> playing -> (goalPause ->
-   playing)* -> ended -> (restart) -> pregame
+   playing)* -> [extraTimeBanner -> playing]? -> [penaltiesIntro ->
+   penalties]? -> ended -> (restart) -> pregame
    Only 'playing' runs full player/AI/collision physics; the others are
    deliberately restricted so a countdown, a goal celebration, or a
    finished match can't be interrupted or skipped by input.
+   If regulation ends level, extra time (+30s) is played; if still level
+   after that, it goes to a penalty shootout.
    --------------------------------------------------------------------- */
 let gamePhase = 'menu';
 let phaseTimer = 0;
@@ -282,6 +290,70 @@ const MATCH_DURATION = 60;
 
 let scoreLeft = 0;
 let scoreRight = 0;
+
+/* ---------------------------------------------------------------------
+   EXTRA TIME + PENALTY SHOOTOUT
+   'player' always means the left/blue side (attackDir 1), 'opponent'
+   always means the right/red side (attackDir -1) — matching how those
+   entities are used everywhere else, regardless of who's human.
+
+   Penalties switch to a dedicated face-on "aim at a zone" view instead of
+   reusing the side-view physics — a keeper standing in a short goal was
+   able to smother almost anything in that view, which isn't a fair or
+   fun shootout. Here the goal is split into 3 columns x 2 rows; the
+   shooter picks a zone and kicks, the keeper (human or AI) picks a
+   column to dive toward, and a shot beats a keeper in the same column
+   more often the higher/further-corner it's aimed — same "top corner is
+   hardest to stop" read as real football, and every kick is genuinely
+   scorable.
+   --------------------------------------------------------------------- */
+const EXTRA_TIME_DURATION = 30;
+const EXTRA_TIME_BANNER_DURATION = 1.8;
+const PENALTIES_INTRO_DURATION = 2.2;
+
+const PK_ROUNDS = 3;              // regulation kicks each, then sudden death
+const PK_KICK_INTRO_TIME = 1.5;   // "X's turn to shoot" banner before each kick
+const PK_AIM_TIME = 5;            // seconds the shooter has to aim + kick before it's a timeout miss
+const PK_FLIGHT_TIME = 0.6;       // seconds the ball takes to reach the goal
+const PK_RESULT_DISPLAY_TIME = 1.3;
+
+// Save chance when the keeper's dive column matches the shot's column —
+// a high shot (top corner) is deliberately much harder to stop even when
+// read correctly, rewarding well-aimed shots over just picking a side.
+// Save chance depends on whether the keeper matched BOTH the shot's
+// column and row — diving the right way but wrong height (or vice
+// versa) still gives a small chance of an incidental block, but nailing
+// both is what actually makes a save likely.
+const PK_SAVE_CHANCE_MATCHED_LOW = 0.82;
+const PK_SAVE_CHANCE_MATCHED_HIGH = 0.55;
+const PK_SAVE_CHANCE_WRONG_ROW = 0.12;
+
+let extraTimePlayed = false;
+let inPenalties = false;
+let penaltyWinnerIsPlayerSide = null;
+
+let pkPhase = 'intro'; // 'intro' | 'ready' | 'flight' | 'result'
+let pkTimer = 0;
+let pkTurn = 'player'; // whose kick this is: 'player' | 'opponent'
+let pkScores = { player: 0, opponent: 0 };
+let pkTakenCounts = { player: 0, opponent: 0 };
+let pkHistory = []; // [{ side, scored }] in chronological order, for the pip row
+let pkResultText = '';
+
+let pkAimCol = 1;   // shooter's currently selected column: 0 left, 1 center, 2 right
+let pkAimRow = 0;   // shooter's currently selected row: 0 low, 1 high
+let pkShotCol = null; // locked-in shot, set the moment the kick is committed
+let pkShotRow = null;
+let pkBallAnim = 0; // 0..1 flight progress
+
+let pkKeeperCol = 1; // keeper's current column (human: live position; AI: guess once decided)
+let pkKeeperRow = 0; // keeper's current row: 0 low, 1 high — reaching for the top corner
+let pkKeeperDecided = false; // whether the AI keeper has committed yet this kick
+
+let pkAiHasAimed = false;
+let pkAiAimDelay = 0;
+let pkAiKickDelay = 0;
+let pkAiKeeperDelay = 0;
 
 /* ---------------------------------------------------------------------
    POWER-UP STAR
@@ -353,7 +425,7 @@ function gameLoop(now) {
    INPUT
    --------------------------------------------------------------------- */
 const keys = {};
-const MOVE_KEYS = ['a', 'd', 'arrowleft', 'arrowright', 'w', 'arrowup', ' '];
+const MOVE_KEYS = ['a', 'd', 'arrowleft', 'arrowright', 'w', 'arrowup', ' ', 's', 'arrowdown'];
 
 window.addEventListener('keydown', e => {
   const key = e.key.toLowerCase();
@@ -374,6 +446,27 @@ window.addEventListener('keydown', e => {
     } else {
       if (key === 'j') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
       if (key === 'k') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
+    }
+  }
+  if (gamePhase === 'penalties') {
+    if (gameMode === 'twoPlayer') {
+      if (key === 'a') penaltyKeyLeft(player);
+      if (key === 'd') penaltyKeyRight(player);
+      if (key === 'w') penaltyKeyUp(player);
+      if (key === 's') penaltyKeyDown(player);
+      if (key === 'c' || key === 'v') penaltyKeyKick(player);
+
+      if (key === 'arrowleft') penaltyKeyLeft(opponent);
+      if (key === 'arrowright') penaltyKeyRight(opponent);
+      if (key === 'arrowup') penaltyKeyUp(opponent);
+      if (key === 'arrowdown') penaltyKeyDown(opponent);
+      if (key === 'o' || key === 'p') penaltyKeyKick(opponent);
+    } else {
+      if (key === 'a' || key === 'arrowleft') penaltyKeyLeft(player);
+      if (key === 'd' || key === 'arrowright') penaltyKeyRight(player);
+      if (key === 'w' || key === 'arrowup') penaltyKeyUp(player);
+      if (key === 's' || key === 'arrowdown') penaltyKeyDown(player);
+      if (key === 'j' || key === 'k') penaltyKeyKick(player);
     }
   }
   if (key === 'r' && gamePhase === 'ended') {
@@ -477,9 +570,41 @@ function update(dt) {
     phaseTimer -= dt;
     if (phaseTimer <= 0) {
       resetAfterGoal();
-      gamePhase = matchTimeRemaining > 0 ? 'playing' : 'ended';
-      if (gamePhase === 'playing') { kickoffHop(); sfxKickoffGo(); }
+      if (matchTimeRemaining > 0) {
+        gamePhase = 'playing';
+        kickoffHop();
+        sfxKickoffGo();
+      } else {
+        handleTimeExpired();
+      }
     }
+    return;
+  }
+
+  if (gamePhase === 'extraTimeBanner') {
+    phaseTimer -= dt;
+    if (phaseTimer <= 0) {
+      resetAfterGoal();
+      matchTimeRemaining = EXTRA_TIME_DURATION;
+      gamePhase = 'playing';
+      kickoffHop();
+      sfxKickoffGo();
+    }
+    return;
+  }
+
+  if (gamePhase === 'penaltiesIntro') {
+    phaseTimer -= dt;
+    if (phaseTimer <= 0) {
+      gamePhase = 'penalties';
+      pkPhase = 'intro';
+      pkTimer = PK_KICK_INTRO_TIME;
+    }
+    return;
+  }
+
+  if (gamePhase === 'penalties') {
+    updatePenalties(dt);
     return;
   }
 
@@ -490,8 +615,7 @@ function update(dt) {
   // gamePhase === 'playing'
   matchTimeRemaining = Math.max(0, matchTimeRemaining - dt);
   if (matchTimeRemaining <= 0) {
-    gamePhase = 'ended';
-    sfxWhistleEnd();
+    handleTimeExpired();
     return;
   }
 
@@ -1016,6 +1140,40 @@ function startGoalPause(concedingSide) {
   lastConcedingSide = concedingSide;
 }
 
+// Whatever put the clock at zero (normal time, extra time, or a goal
+// scored right at the buzzer during goalPause) funnels through here so
+// the draw -> extra time -> penalties progression is decided in one place.
+function handleTimeExpired() {
+  if (scoreLeft === scoreRight) {
+    if (!extraTimePlayed) { startExtraTime(); return; }
+    if (!inPenalties) { startPenaltyShootout(); return; }
+  }
+  gamePhase = 'ended';
+  sfxWhistleEnd();
+}
+
+function startExtraTime() {
+  extraTimePlayed = true;
+  lastConcedingSide = null; // neutral kickoff, not biased toward either side
+  gamePhase = 'extraTimeBanner';
+  phaseTimer = EXTRA_TIME_BANNER_DURATION;
+  sfxWhistleStart();
+}
+
+function startPenaltyShootout() {
+  inPenalties = true;
+  gamePhase = 'penaltiesIntro';
+  phaseTimer = PENALTIES_INTRO_DURATION;
+  pkScores = { player: 0, opponent: 0 };
+  pkTakenCounts = { player: 0, opponent: 0 };
+  pkHistory = [];
+  pkTurn = 'player';
+  penaltyWinnerIsPlayerSide = null;
+  star = null; // no power-up shenanigans during a shootout
+  floatingTexts = [];
+  sfxWhistleStart();
+}
+
 // Concession kickoff: the ball drops closer to whoever just conceded,
 // giving them a fair first chance to clear it instead of a neutral
 // 50/50 restart every single time.
@@ -1049,12 +1207,24 @@ function resetAfterGoal(fullReset) {
   if (fullReset) star = null;
 }
 
+function resetExtraTimeAndPenalties() {
+  extraTimePlayed = false;
+  inPenalties = false;
+  penaltyWinnerIsPlayerSide = null;
+  pkScores = { player: 0, opponent: 0 };
+  pkTakenCounts = { player: 0, opponent: 0 };
+  pkHistory = [];
+  pkTurn = 'player';
+  pkPhase = 'intro';
+}
+
 function restartMatch() {
   scoreLeft = 0; scoreRight = 0;
   document.getElementById('scoreLeft').textContent = '0';
   document.getElementById('scoreRight').textContent = '0';
   lastConcedingSide = null;
   resetAfterGoal(true);
+  resetExtraTimeAndPenalties();
   starSpawnTimer = STAR_SPAWN_INTERVAL;
   startPregame();
 }
@@ -1065,9 +1235,214 @@ function returnToMenu() {
   document.getElementById('scoreRight').textContent = '0';
   lastConcedingSide = null;
   resetAfterGoal(true);
+  resetExtraTimeAndPenalties();
   starSpawnTimer = STAR_SPAWN_INTERVAL;
   gameMode = null;
   gamePhase = 'menu';
+}
+
+/* ---------------------------------------------------------------------
+   PENALTY SHOOTOUT
+   Front-on "aim at a zone" view instead of reusing the side-view physics.
+   The goal is split into 3 columns x 2 rows. The shooter (human or AI)
+   picks a zone and kicks; the keeper (human or AI) picks a column to
+   dive toward. A shot beats a keeper diving into the same column more
+   often the higher it's aimed — a low shot into a guessed column is
+   usually saved, but a well-placed top-corner shot beats it more often
+   than not, same as real football, and every kick is genuinely scorable.
+   --------------------------------------------------------------------- */
+function currentKeeperSide() { return pkTurn === 'player' ? 'opponent' : 'player'; }
+function isSideAI(side) { return gameMode !== 'twoPlayer' && side === 'opponent'; }
+
+function updatePenalties(dt) {
+  if (pkPhase === 'intro') {
+    pkTimer -= dt;
+    if (pkTimer <= 0) {
+      setupPenaltyKick();
+      pkPhase = 'ready';
+      pkTimer = PK_AIM_TIME;
+    }
+    return;
+  }
+
+  if (pkPhase === 'ready') {
+    pkTimer -= dt;
+
+    if (isSideAI(pkTurn)) {
+      if (!pkAiHasAimed) {
+        pkAiAimDelay -= dt;
+        if (pkAiAimDelay <= 0) {
+          pkAimCol = Math.floor(Math.random() * 3);
+          pkAimRow = Math.random() < 0.5 ? 0 : 1;
+          pkAiHasAimed = true;
+          pkAiKickDelay = 0.35;
+        }
+      } else {
+        pkAiKickDelay -= dt;
+        if (pkAiKickDelay <= 0) { commitPenaltyShot(); return; }
+      }
+    }
+
+    if (pkTimer <= 0) finishPenaltyKick(false, 'TOO SLOW!');
+    return;
+  }
+
+  if (pkPhase === 'flight') {
+    pkTimer -= dt;
+    pkBallAnim = clamp(1 - pkTimer / PK_FLIGHT_TIME, 0, 1);
+
+    const keeperSide = currentKeeperSide();
+    if (isSideAI(keeperSide) && !pkKeeperDecided) {
+      pkAiKeeperDelay -= dt;
+      if (pkAiKeeperDelay <= 0) {
+        pkKeeperCol = weightedRandomKeeperColumn();
+        pkKeeperRow = Math.random() < 0.5 ? 0 : 1;
+        pkKeeperDecided = true;
+      }
+    }
+
+    if (pkTimer <= 0) resolvePenaltyShot();
+    return;
+  }
+
+  if (pkPhase === 'result') {
+    pkTimer -= dt;
+    if (pkTimer <= 0) advancePenalties();
+  }
+}
+
+function setupPenaltyKick() {
+  pkAimCol = 1;
+  pkAimRow = 0;
+  pkKeeperCol = 1;
+  pkKeeperRow = 0;
+  pkKeeperDecided = false;
+  pkShotCol = null;
+  pkShotRow = null;
+  pkBallAnim = 0;
+  pkAiHasAimed = false;
+  pkAiAimDelay = 0.5 + Math.random() * 0.7;
+  pkAiKickDelay = 0;
+  pkAiKeeperDelay = 0.12 + Math.random() * 0.2;
+}
+
+function commitPenaltyShot() {
+  pkShotCol = pkAimCol;
+  pkShotRow = pkAimRow;
+  pkPhase = 'flight';
+  pkTimer = PK_FLIGHT_TIME;
+  pkBallAnim = 0;
+  sfxKick(pkShotRow === 1 ? 'high' : 'low');
+}
+
+function weightedRandomKeeperColumn() {
+  const r = Math.random();
+  if (r < 0.4) return 0;
+  if (r < 0.6) return 1;
+  return 2;
+}
+
+function resolvePenaltyShot() {
+  // Safety fallback if an AI keeper somehow never committed — never
+  // overrides a human's live position, only fills in for a skipped AI turn.
+  if (isSideAI(currentKeeperSide()) && !pkKeeperDecided) {
+    pkKeeperCol = weightedRandomKeeperColumn();
+    pkKeeperRow = Math.random() < 0.5 ? 0 : 1;
+  }
+
+  const sameColumn = pkKeeperCol === pkShotCol;
+  const sameRow = pkKeeperRow === pkShotRow;
+
+  let saveChance = 0;
+  if (sameColumn && sameRow) {
+    saveChance = pkShotRow === 1 ? PK_SAVE_CHANCE_MATCHED_HIGH : PK_SAVE_CHANCE_MATCHED_LOW;
+  } else if (sameColumn) {
+    saveChance = PK_SAVE_CHANCE_WRONG_ROW; // right side, wrong height — small chance of an incidental block
+  }
+  // wrong column entirely: 0% — a clean beat, regardless of row
+  const saved = Math.random() < saveChance;
+  finishPenaltyKick(!saved, saved ? 'SAVED!' : 'GOAL!');
+}
+
+function finishPenaltyKick(scored, resultText) {
+  pkResultText = resultText;
+  pkHistory.push({ side: pkTurn, scored });
+  pkTakenCounts[pkTurn]++;
+  if (scored) {
+    pkScores[pkTurn]++;
+    sfxGoal();
+  } else {
+    playTone({ freq: 220, freqEnd: 120, duration: 0.35, type: 'sawtooth', volume: 0.18 });
+  }
+  pkPhase = 'result';
+  pkTimer = PK_RESULT_DISPLAY_TIME;
+}
+
+// Deliberately only ever decided right after a completed round (both
+// sides have taken the same number of kicks) — real shootouts can end
+// mid-round the instant the outcome is mathematically certain, but
+// checking only at round boundaries keeps this simple and still fair,
+// at the cost of occasionally playing one extra kick that no longer
+// matters.
+function isPenaltyDecided() {
+  if (pkTakenCounts.player !== pkTakenCounts.opponent) return false;
+  const roundsCompleted = pkTakenCounts.player;
+  if (roundsCompleted < PK_ROUNDS) {
+    const roundsLeftEach = PK_ROUNDS - roundsCompleted;
+    return Math.abs(pkScores.player - pkScores.opponent) > roundsLeftEach;
+  }
+  return pkScores.player !== pkScores.opponent; // sudden death: any difference decides it
+}
+
+function advancePenalties() {
+  if (isPenaltyDecided()) {
+    endPenalties();
+    return;
+  }
+  pkTurn = pkTurn === 'player' ? 'opponent' : 'player';
+  pkPhase = 'intro';
+  pkTimer = PK_KICK_INTRO_TIME;
+}
+
+function endPenalties() {
+  penaltyWinnerIsPlayerSide = pkScores.player > pkScores.opponent;
+  gamePhase = 'ended';
+  sfxWhistleEnd();
+}
+
+// Aim/dive input — keys always belong to the same entity they do in
+// normal play, but only do anything relevant to whichever role (shooter
+// or keeper) that entity currently has this kick.
+function penaltyKeyLeft(entity) {
+  if (gamePhase !== 'penalties') return;
+  const shooter = pkTurn === 'player' ? player : opponent;
+  if (entity === shooter && pkPhase === 'ready') pkAimCol = clamp(pkAimCol - 1, 0, 2);
+  else if (entity !== shooter && pkPhase === 'flight') pkKeeperCol = clamp(pkKeeperCol - 1, 0, 2);
+}
+function penaltyKeyRight(entity) {
+  if (gamePhase !== 'penalties') return;
+  const shooter = pkTurn === 'player' ? player : opponent;
+  if (entity === shooter && pkPhase === 'ready') pkAimCol = clamp(pkAimCol + 1, 0, 2);
+  else if (entity !== shooter && pkPhase === 'flight') pkKeeperCol = clamp(pkKeeperCol + 1, 0, 2);
+}
+function penaltyKeyUp(entity) {
+  if (gamePhase !== 'penalties') return;
+  const shooter = pkTurn === 'player' ? player : opponent;
+  if (entity === shooter && pkPhase === 'ready') pkAimRow = 1;
+  else if (entity !== shooter && pkPhase === 'flight') pkKeeperRow = 1;
+}
+function penaltyKeyDown(entity) {
+  if (gamePhase !== 'penalties') return;
+  const shooter = pkTurn === 'player' ? player : opponent;
+  if (entity === shooter && pkPhase === 'ready') pkAimRow = 0;
+  else if (entity !== shooter && pkPhase === 'flight') pkKeeperRow = 0;
+}
+function penaltyKeyKick(entity) {
+  if (gamePhase !== 'penalties' || pkPhase !== 'ready') return;
+  const shooter = pkTurn === 'player' ? player : opponent;
+  if (entity !== shooter) return;
+  if (isSideAI(pkTurn)) return; // AI shoots itself — a human keeper's kick key does nothing here
+  commitPenaltyShot();
 }
 
 /* ---------------------------------------------------------------------
@@ -1075,19 +1450,27 @@ function returnToMenu() {
    --------------------------------------------------------------------- */
 function render() {
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-  drawSky();
-  drawPitch();
-  drawGoal(true);
-  drawGoal(false);
-  if (star) drawStar(star);
-  drawEntitiesSorted();
-  drawFloatingTexts();
-  drawTimerBadge();
-  drawStarCountdown();
+
+  if (gamePhase === 'penalties' || gamePhase === 'penaltiesIntro') {
+    drawPenaltyScene();
+  } else {
+    drawSky();
+    drawPitch();
+    drawGoal(true);
+    drawGoal(false);
+    if (star) drawStar(star);
+    drawEntitiesSorted();
+    drawFloatingTexts();
+    drawTimerBadge();
+    drawStarCountdown();
+  }
 
   if (gamePhase === 'menu') drawModeMenu();
   if (gamePhase === 'pregame') drawPregameOverlay();
   if (gamePhase === 'goalPause') drawGoalBanner();
+  if (gamePhase === 'extraTimeBanner') drawExtraTimeBanner();
+  if (gamePhase === 'penaltiesIntro') drawPenaltiesIntroBanner();
+  if (gamePhase === 'penalties') drawPenaltyHUD();
   if (gamePhase === 'ended') drawEndedOverlay();
 }
 
@@ -1222,6 +1605,10 @@ function drawSky() {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, CANVAS_W, GROUND_Y);
 
+  drawClouds();
+  drawFloodlight(36);
+  drawFloodlight(CANVAS_W - 36);
+
   [CANVAS_W * 0.15, CANVAS_W * 0.5, CANVAS_W * 0.85].forEach(lx => {
     const glow = ctx.createRadialGradient(lx, 20, 4, lx, 20, 130);
     glow.addColorStop(0, 'rgba(255,255,230,0.22)');
@@ -1231,17 +1618,78 @@ function drawSky() {
     ctx.arc(lx, 20, 130, 0, Math.PI * 2);
     ctx.fill();
   });
+
+  // Soft vignette so the corners recede a touch and the action in the
+  // middle of the pitch reads as the focal point.
+  const vignette = ctx.createRadialGradient(
+    CANVAS_W / 2, GROUND_Y * 0.65, GROUND_Y * 0.35,
+    CANVAS_W / 2, GROUND_Y * 0.65, CANVAS_W * 0.72
+  );
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, CANVAS_W, GROUND_Y);
+}
+
+// A handful of soft, slow-drifting cloud puffs — quiet atmosphere that
+// doesn't compete with the ball/players for attention.
+const CLOUDS = [
+  { x: 0.12, y: 46, s: 1.0 },
+  { x: 0.38, y: 30, s: 0.75 },
+  { x: 0.68, y: 52, s: 1.15 },
+  { x: 0.9, y: 34, s: 0.8 }
+];
+
+function drawClouds() {
+  const drift = (performance.now() / 40000) % 1;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  CLOUDS.forEach(c => {
+    const x = ((c.x + drift) % 1.2 - 0.1) * CANVAS_W;
+    drawCloudPuff(x, c.y, c.s);
+  });
+  ctx.restore();
+}
+
+function drawCloudPuff(x, y, s) {
+  ctx.beginPath();
+  ctx.ellipse(x, y, 34 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + 26 * s, y + 4 * s, 22 * s, 9 * s, 0, 0, Math.PI * 2);
+  ctx.ellipse(x - 24 * s, y + 5 * s, 20 * s, 8 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawFloodlight(x) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(220,228,232,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, 2);
+  ctx.lineTo(x - 15, 58);
+  ctx.moveTo(x, 2);
+  ctx.lineTo(x + 15, 58);
+  ctx.moveTo(x - 10, 32);
+  ctx.lineTo(x + 10, 32);
+  ctx.stroke();
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.fillRect(x - 17, 0, 34, 6);
+  ctx.restore();
 }
 
 function drawPitch() {
   ctx.fillStyle = '#2e7d4f';
   ctx.fillRect(0, GROUND_Y, CANVAS_W, CANVAS_H - GROUND_Y);
 
-  const stripeW = 54;
-  for (let x = 0, i = 0; x < CANVAS_W; x += stripeW, i++) {
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.07)';
-    ctx.fillRect(x, GROUND_Y, stripeW, CANVAS_H - GROUND_Y);
-  }
+  drawTurfDiamonds();
+
+  // A soft highlight right at the very top of the grass gives the turf a
+  // touch of edge lighting instead of a flat cutoff against the sky.
+  const edgeGlow = ctx.createLinearGradient(0, GROUND_Y, 0, GROUND_Y + 14);
+  edgeGlow.addColorStop(0, 'rgba(255,255,255,0.16)');
+  edgeGlow.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = edgeGlow;
+  ctx.fillRect(0, GROUND_Y, CANVAS_W, 14);
 
   ctx.strokeStyle = 'rgba(255,255,255,0.7)';
   ctx.lineWidth = 3;
@@ -1259,6 +1707,57 @@ function drawPitch() {
   ctx.arc(CANVAS_W / 2, GROUND_Y, 3, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fill();
+
+  drawCornerFlag(6);
+  drawCornerFlag(CANVAS_W - 6);
+}
+
+// Diagonal diamond-tile mowing pattern instead of plain vertical stripes —
+// a classic arcade-pitch look.
+function drawTurfDiamonds() {
+  const groundH = CANVAS_H - GROUND_Y;
+  const tileW = 46;
+  const cy = GROUND_Y + groundH / 2;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, GROUND_Y, CANVAS_W, groundH);
+  ctx.clip();
+
+  const halfW = tileW / 2;
+  const halfH = groundH * 0.9;
+  let i = 0;
+  for (let cx = -tileW; cx < CANVAS_W + tileW; cx += halfW, i++) {
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - halfH);
+    ctx.lineTo(cx + halfW, cy);
+    ctx.lineTo(cx, cy + halfH);
+    ctx.lineTo(cx - halfW, cy);
+    ctx.closePath();
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)';
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCornerFlag(x) {
+  const baseY = GROUND_Y;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.lineTo(x, baseY - 22);
+  ctx.stroke();
+
+  ctx.fillStyle = '#ff5b5b';
+  ctx.beginPath();
+  ctx.moveTo(x, baseY - 22);
+  ctx.lineTo(x + (x < CANVAS_W / 2 ? 12 : -12), baseY - 18);
+  ctx.lineTo(x, baseY - 14);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawGoal(isLeft) {
@@ -1294,7 +1793,7 @@ function drawGoal(isLeft) {
 }
 
 function drawTimerBadge() {
-  if (gamePhase === 'pregame') return;
+  if (gamePhase === 'pregame' || gamePhase === 'penaltiesIntro' || gamePhase === 'penalties') return;
   const secs = Math.ceil(matchTimeRemaining);
   const urgent = secs <= 10 && gamePhase === 'playing';
 
@@ -1313,6 +1812,14 @@ function drawTimerBadge() {
   ctx.fillText(String(secs), CANVAS_W / 2, by + bh / 2 + 1);
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
+
+  if (extraTimePlayed && gamePhase === 'playing') {
+    ctx.font = 'bold 11px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = '#ffd23f';
+    ctx.textAlign = 'center';
+    ctx.fillText('EXTRA TIME', CANVAS_W / 2, by + bh + 12);
+    ctx.textAlign = 'start';
+  }
 }
 
 function drawPregameOverlay() {
@@ -1356,6 +1863,334 @@ function drawGoalBanner() {
   ctx.textBaseline = 'alphabetic';
 }
 
+function drawExtraTimeBanner() {
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 42px Segoe UI, Arial, sans-serif';
+  ctx.fillText('EXTRA TIME!', CANVAS_W / 2, CANVAS_H / 2 - 10);
+  ctx.font = '16px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#eafaf0';
+  ctx.fillText("It's a draw — 30 more seconds", CANVAS_W / 2, CANVAS_H / 2 + 26);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPenaltiesIntroBanner() {
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold 40px Segoe UI, Arial, sans-serif';
+  ctx.fillText('PENALTY SHOOTOUT!', CANVAS_W / 2, CANVAS_H / 2 - 10);
+  ctx.font = '16px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#eafaf0';
+  ctx.fillText(`Best of ${PK_ROUNDS} — sudden death if still tied`, CANVAS_W / 2, CANVAS_H / 2 + 26);
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPenaltyHUD() {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.font = 'bold 14px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText('PENALTY SHOOTOUT', CANVAS_W / 2, 66);
+
+  drawPenaltyPips(CANVAS_W / 2 - 96, 84, pkHistory.filter(k => k.side === 'player'), '#3fa7ff');
+  drawPenaltyPips(CANVAS_W / 2 + 22, 84, pkHistory.filter(k => k.side === 'opponent'), '#ff5b5b');
+
+  ctx.font = 'bold 13px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText(`${pkScores.player} - ${pkScores.opponent}`, CANVAS_W / 2, 102);
+
+  ctx.textBaseline = 'middle';
+  if (pkPhase === 'intro') {
+    const label = pkTurn === 'player'
+      ? (gameMode === 'twoPlayer' ? 'BLUE' : 'YOUR')
+      : (gameMode === 'twoPlayer' ? 'RED' : "AI's");
+    ctx.font = 'bold 28px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText(`${label} TURN TO SHOOT`, CANVAS_W / 2, CANVAS_H / 2 - 70);
+  } else if (pkPhase === 'ready') {
+    const isHumanShooting = gameMode === 'twoPlayer' || pkTurn === 'player';
+    ctx.font = 'bold 16px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillText(isHumanShooting ? 'Move to aim, then kick!' : 'AI is picking a spot...', CANVAS_W / 2, CANVAS_H / 2 - 100);
+  } else if (pkPhase === 'flight') {
+    const isHumanKeeping = !isSideAI(currentKeeperSide());
+    ctx.font = 'bold 15px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.75)';
+    ctx.fillText(isHumanKeeping ? 'Move to dive — reach up for the corner!' : '', CANVAS_W / 2, CANVAS_H / 2 - 100);
+  } else if (pkPhase === 'result') {
+    ctx.font = 'bold 44px Segoe UI, Arial, sans-serif';
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.strokeText(pkResultText, CANVAS_W / 2, CANVAS_H / 2 - 70);
+    ctx.fillStyle = pkResultText === 'GOAL!' ? '#ffd23f' : '#ff5b5b';
+    ctx.fillText(pkResultText, CANVAS_W / 2, CANVAS_H / 2 - 70);
+  }
+
+  ctx.restore();
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPenaltyPips(startX, y, kicks, color) {
+  const r = 6;
+  const count = Math.max(PK_ROUNDS, kicks.length);
+  for (let i = 0; i < count; i++) {
+    const kick = kicks[i];
+    const cx = startX + i * (r * 2 + 6);
+    ctx.beginPath();
+    ctx.arc(cx, y, r, 0, Math.PI * 2);
+    if (!kick) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    } else if (kick.scored) {
+      ctx.fillStyle = color;
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx - 3, y - 3); ctx.lineTo(cx + 3, y + 3);
+      ctx.moveTo(cx + 3, y - 3); ctx.lineTo(cx - 3, y + 3);
+      ctx.strokeStyle = color;
+      ctx.stroke();
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------
+   PENALTY SCENE — face-on view used only during the shootout: sky/grass
+   backdrop, a big goal frame split into 3x2 aim zones, a keeper who can
+   dive between columns, and a shooter in the foreground. Fully separate
+   from the side-view pitch renderer above; none of this touches the
+   real player/opponent physics state.
+   --------------------------------------------------------------------- */
+function penaltyGoalRect() {
+  const width = 420, height = 190;
+  const left = CANVAS_W / 2 - width / 2;
+  const top = 92;
+  return { left, right: left + width, top, bottom: top + height };
+}
+
+function penaltyZoneCenter(goal, col, row) {
+  const colW = (goal.right - goal.left) / 3;
+  const rowH = (goal.bottom - goal.top) / 2;
+  const x = goal.left + colW * (col + 0.5);
+  const y = row === 1 ? goal.top + rowH * 0.5 : goal.top + rowH * 1.5;
+  return { x, y };
+}
+
+function drawPenaltyScene() {
+  const gradient = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+  gradient.addColorStop(0, '#0b1622');
+  gradient.addColorStop(0.55, '#132a3a');
+  gradient.addColorStop(1, '#2e7d4f');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  drawFloodlight(70);
+  drawFloodlight(CANVAS_W - 70);
+
+  const grassTop = 300;
+  ctx.fillStyle = '#2e7d4f';
+  ctx.fillRect(0, grassTop, CANVAS_W, CANVAS_H - grassTop);
+  const stripeW = 60;
+  for (let x = 0, i = 0; x < CANVAS_W; x += stripeW, i++) {
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
+    ctx.fillRect(x, grassTop, stripeW, CANVAS_H - grassTop);
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(CANVAS_W / 2, grassTop + 30, 74, 0.12 * Math.PI, 0.88 * Math.PI);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(CANVAS_W / 2, grassTop + 58, 3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fill();
+
+  const goal = penaltyGoalRect();
+  drawPenaltyGoalFrame(goal);
+
+  if (pkPhase === 'ready' && !isSideAI(pkTurn)) {
+    drawPenaltyReticle(goal);
+  }
+
+  const keeperEntity = pkTurn === 'player' ? opponent : player;
+  drawPenaltyKeeper(goal, keeperEntity);
+
+  const shooterEntity = pkTurn === 'player' ? player : opponent;
+  drawPenaltyShooter(shooterEntity);
+  drawPenaltyBallScene(goal);
+}
+
+function drawPenaltyGoalFrame(goal) {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1;
+  const netSpacing = 14;
+  for (let x = goal.left; x <= goal.right; x += netSpacing) {
+    ctx.beginPath(); ctx.moveTo(x, goal.top); ctx.lineTo(x, goal.bottom); ctx.stroke();
+  }
+  for (let y = goal.top; y <= goal.bottom; y += netSpacing) {
+    ctx.beginPath(); ctx.moveTo(goal.left, y); ctx.lineTo(goal.right, y); ctx.stroke();
+  }
+
+  ctx.strokeStyle = '#eafaf0';
+  ctx.lineWidth = 8;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(goal.left, goal.bottom);
+  ctx.lineTo(goal.left, goal.top);
+  ctx.lineTo(goal.right, goal.top);
+  ctx.lineTo(goal.right, goal.bottom);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPenaltyReticle(goal) {
+  const { x, y } = penaltyZoneCenter(goal, pkAimCol, pkAimRow);
+  const pulse = 1 + Math.sin(performance.now() / 150) * 0.08;
+  ctx.save();
+  ctx.strokeStyle = '#ffd23f';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(x, y, 22 * pulse, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 10, y); ctx.lineTo(x + 10, y);
+  ctx.moveTo(x, y - 10); ctx.lineTo(x, y + 10);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPenaltyKeeper(goal, entity) {
+  const diving = pkPhase === 'flight' || pkPhase === 'result';
+  const col = diving ? pkKeeperCol : 1;
+  const row = diving ? pkKeeperRow : 0;
+  const rowH = (goal.bottom - goal.top) / 2;
+  const x = goal.left + ((goal.right - goal.left) / 3) * (col + 0.5);
+  const y = diving && row === 1 ? goal.top + rowH * 0.75 : goal.top + rowH * 1.35;
+  const pose = !diving ? 'stand' : col === 0 ? 'diveLeft' : col === 2 ? 'diveRight' : 'diveCenter';
+  drawPenaltyFigure(x, y, 1.5, entity, pose, diving && row === 1);
+}
+
+function drawPenaltyShooter(entity) {
+  const x = CANVAS_W / 2 - 55;
+  const y = CANVAS_H - 76;
+  const pose = pkPhase === 'ready' ? 'stand' : 'kick';
+  drawPenaltyFigure(x, y, 2.6, entity, pose, false);
+}
+
+// Simplified stand-in figure (not the full side-view character rig, which
+// is built around a different coordinate system) — reuses each entity's
+// own colors so it's still clearly "your" character. `reaching` stretches
+// the pose upward for a keeper going for a high corner.
+function drawPenaltyFigure(x, y, scale, entity, pose, reaching) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  const lean = pose === 'diveLeft' ? -28 : pose === 'diveRight' ? 28 : 0;
+  ctx.rotate((lean * Math.PI) / 180);
+
+  ctx.fillStyle = entity.bootColor;
+  ctx.fillRect(-10, 10, 8, 18);
+  ctx.fillRect(2, 10, 8, 18);
+
+  ctx.strokeStyle = entity.jerseyColor;
+  ctx.lineWidth = 6;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  const armSpread = pose === 'kick' ? 26 : pose.startsWith('dive') ? 24 : 20;
+  const armLift = pose === 'kick' ? -4 : pose.startsWith('dive') ? (reaching ? -36 : -22) : 0;
+  ctx.moveTo(-13, -6); ctx.lineTo(-armSpread, armLift);
+  ctx.moveTo(13, -6); ctx.lineTo(armSpread, armLift);
+  ctx.stroke();
+
+  ctx.fillStyle = entity.jerseyColor;
+  ctx.beginPath();
+  ctx.moveTo(-14, -10);
+  ctx.lineTo(14, -10);
+  ctx.lineTo(11, 14);
+  ctx.lineTo(-11, 14);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = entity.skin;
+  ctx.beginPath();
+  ctx.arc(0, -20, 11, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = entity.hairColor;
+  ctx.beginPath();
+  ctx.arc(0, -25, 10.5, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawPenaltyBallScene(goal) {
+  const startX = CANVAS_W / 2, startY = CANVAS_H - 66;
+  let x = startX, y = startY, radius = 15;
+
+  if (pkPhase === 'flight' || pkPhase === 'result') {
+    const target = penaltyZoneCenter(goal, pkShotCol, pkShotRow);
+    const t = pkBallAnim;
+    x = startX + (target.x - startX) * t;
+    y = startY + (target.y - startY) * t;
+    radius = 15 - 7 * t;
+
+    if (pkPhase === 'result' && pkResultText === 'SAVED!') {
+      const keeperPos = penaltyZoneCenter(goal, pkKeeperCol, pkKeeperRow);
+      x = keeperPos.x; y = keeperPos.y - 8; radius = 9;
+    }
+  }
+
+  drawPenaltyBall(x, y, radius);
+}
+
+function drawPenaltyBall(x, y, radius) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  const base = ctx.createRadialGradient(-radius * 0.3, -radius * 0.3, radius * 0.1, 0, 0, radius);
+  base.addColorStop(0, '#ffffff');
+  base.addColorStop(1, '#e2dcce');
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = base;
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.clip();
+  drawSoccerPattern(radius);
+  ctx.restore();
+
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 function drawEndedOverlay() {
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -1365,19 +2200,33 @@ function drawEndedOverlay() {
 
   ctx.fillStyle = '#eafaf0';
   ctx.font = 'bold 42px Segoe UI, Arial, sans-serif';
-  ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 30);
+  ctx.fillText(inPenalties ? 'Penalties!' : "Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 40);
 
-  const result = scoreLeft === scoreRight
-    ? 'Draw!'
-    : gameMode === 'twoPlayer'
-      ? (scoreLeft > scoreRight ? 'Blue Wins!' : 'Red Wins!')
-      : (scoreLeft > scoreRight ? 'You Win!' : 'AI Wins');
+  let result;
+  if (inPenalties) {
+    const wonPK = penaltyWinnerIsPlayerSide;
+    result = gameMode === 'twoPlayer'
+      ? (wonPK ? 'Blue Wins on Penalties!' : 'Red Wins on Penalties!')
+      : (wonPK ? 'You Win on Penalties!' : 'AI Wins on Penalties!');
+  } else {
+    result = scoreLeft === scoreRight
+      ? 'Draw!'
+      : gameMode === 'twoPlayer'
+        ? (scoreLeft > scoreRight ? 'Blue Wins!' : 'Red Wins!')
+        : (scoreLeft > scoreRight ? 'You Win!' : 'AI Wins');
+  }
   ctx.font = 'bold 24px Segoe UI, Arial, sans-serif';
-  ctx.fillText(result, CANVAS_W / 2, CANVAS_H / 2 + 14);
+  ctx.fillText(result, CANVAS_W / 2, CANVAS_H / 2);
+
+  if (inPenalties) {
+    ctx.font = '14px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = '#9fcbb0';
+    ctx.fillText(`Match: ${scoreLeft} - ${scoreRight}   Penalties: ${pkScores.player} - ${pkScores.opponent}`, CANVAS_W / 2, CANVAS_H / 2 + 28);
+  }
 
   ctx.font = '15px Segoe UI, Arial, sans-serif';
   ctx.fillStyle = '#9fcbb0';
-  ctx.fillText('Press R to play again, or M for the mode menu', CANVAS_W / 2, CANVAS_H / 2 + 48);
+  ctx.fillText('Press R to play again, or M for the mode menu', CANVAS_W / 2, CANVAS_H / 2 + (inPenalties ? 54 : 48));
 
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
