@@ -102,20 +102,22 @@
 
 <div id="instructions">
   <strong>Click the field once to give it keyboard focus,</strong> then press
-  1 or 2 on the mode menu to start.
+  1 or 2 on the mode menu, then 1 or 2 again to play a full match or jump
+  straight to penalties.
   <br>
   <strong>1 Player (vs AI):</strong> WASD or Arrows to move, J = low kick, K = high kick.
   <br>
   <strong>2 Player:</strong> Player 1 — WASD to move, C = low kick, V = high kick.
   Player 2 — Arrow keys to move, O = low kick, P = high kick.
   <br>
-  First to lead when the 60-second clock runs out wins. If it's level, you
-  get 30 seconds of extra time; still level after that, and it comes down
-  to a penalty shootout — a face-on view where the shooter moves the
-  reticle to a zone (left/right to pick a side, up/down for low or a
-  harder-to-stop high corner) and kicks, while the keeper moves the same
-  way to dive toward a side and reach high or stay low. Press R to play
-  again, or M for the mode menu, after full time.
+  First to lead when the 60-second clock runs out wins. If it's level,
+  press 1 or 2 to choose extra time (+30 seconds, then penalties only if
+  still level) or go straight to a penalty shootout — a face-on view
+  where the shooter moves the reticle to a zone (left/right to pick a
+  side, up/down for low or a harder-to-stop high corner) and kicks,
+  while the keeper moves the same way to dive toward a side and reach
+  high or stay low. Press R to play again, or M for the mode menu, after
+  full time.
   A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
   a random buff: a taller goal, a speed boost, a giant player, or a freeze
   on your opponent. Camping in front of your own goal for too long is
@@ -330,6 +332,7 @@ const PK_SAVE_CHANCE_WRONG_ROW = 0.12;
 
 let extraTimePlayed = false;
 let inPenalties = false;
+let penaltiesOnlyMode = false; // chosen from the match-type menu: skip straight to a shootout, no regulation time played
 let penaltyWinnerIsPlayerSide = null;
 
 let pkPhase = 'intro'; // 'intro' | 'ready' | 'flight' | 'result'
@@ -403,7 +406,17 @@ function startPregame() {
 
 function chooseMode(mode) {
   gameMode = mode;
-  startPregame();
+  gamePhase = 'matchTypeMenu';
+}
+
+function startPenaltiesOnlyMatch() {
+  scoreLeft = 0; scoreRight = 0;
+  document.getElementById('scoreLeft').textContent = '0';
+  document.getElementById('scoreRight').textContent = '0';
+  resetExtraTimeAndPenalties();
+  penaltiesOnlyMode = true;
+  starSpawnTimer = STAR_SPAWN_INTERVAL;
+  startPenaltyShootout();
 }
 
 /* ---------------------------------------------------------------------
@@ -432,12 +445,29 @@ window.addEventListener('keydown', e => {
   keys[key] = true;
   if (MOVE_KEYS.includes(key)) e.preventDefault();
 
-  if (gamePhase === 'menu') {
+  // Snapshot the phase once: several branches below (chooseMode,
+  // startPregame, etc.) change gamePhase synchronously, and re-reading the
+  // live variable in later checks would let one keypress cascade straight
+  // through two menus in the same event (e.g. picking a mode instantly
+  // "pressing" the next menu's option 1 too).
+  const phase = gamePhase;
+
+  if (phase === 'menu') {
     if (key === '1') { e.preventDefault(); chooseMode('ai'); }
     if (key === '2') { e.preventDefault(); chooseMode('twoPlayer'); }
   }
 
-  if (gamePhase === 'playing') {
+  if (phase === 'matchTypeMenu') {
+    if (key === '1') { e.preventDefault(); startPregame(); }
+    if (key === '2') { e.preventDefault(); startPenaltiesOnlyMatch(); }
+  }
+
+  if (phase === 'extraTimeChoice') {
+    if (key === '1') { e.preventDefault(); startExtraTime(); }
+    if (key === '2') { e.preventDefault(); startPenaltyShootout(); }
+  }
+
+  if (phase === 'playing') {
     if (gameMode === 'twoPlayer') {
       if (key === 'c') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'low'); }
       if (key === 'v') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
@@ -448,7 +478,7 @@ window.addEventListener('keydown', e => {
       if (key === 'k') { e.preventDefault(); if (player.frozenTimer <= 0) tryShoot(player, 'high'); }
     }
   }
-  if (gamePhase === 'penalties') {
+  if (phase === 'penalties') {
     if (gameMode === 'twoPlayer') {
       if (key === 'a') penaltyKeyLeft(player);
       if (key === 'd') penaltyKeyRight(player);
@@ -469,11 +499,11 @@ window.addEventListener('keydown', e => {
       if (key === 'j' || key === 'k') penaltyKeyKick(player);
     }
   }
-  if (key === 'r' && gamePhase === 'ended') {
+  if (key === 'r' && phase === 'ended') {
     e.preventDefault();
     restartMatch();
   }
-  if (key === 'm' && gamePhase === 'ended') {
+  if (key === 'm' && phase === 'ended') {
     e.preventDefault();
     returnToMenu();
   }
@@ -554,6 +584,10 @@ function update(dt) {
     return;
   }
 
+  if (gamePhase === 'matchTypeMenu') {
+    return; // waiting on a keypress (1 = full match, 2 = penalties only) — see keydown listener
+  }
+
   if (gamePhase === 'pregame') {
     phaseTimer -= dt;
     moveBall(dt); // let it visibly drop in during the countdown
@@ -579,6 +613,10 @@ function update(dt) {
       }
     }
     return;
+  }
+
+  if (gamePhase === 'extraTimeChoice') {
+    return; // waiting on a keypress (1 = extra time, 2 = penalties) — see keydown listener
   }
 
   if (gamePhase === 'extraTimeBanner') {
@@ -1145,8 +1183,11 @@ function startGoalPause(concedingSide) {
 // the draw -> extra time -> penalties progression is decided in one place.
 function handleTimeExpired() {
   if (scoreLeft === scoreRight) {
-    if (!extraTimePlayed) { startExtraTime(); return; }
-    if (!inPenalties) { startPenaltyShootout(); return; }
+    if (!extraTimePlayed && !inPenalties) {
+      gamePhase = 'extraTimeChoice'; // ask once, right after regulation ends in a draw
+      return;
+    }
+    if (!inPenalties) { startPenaltyShootout(); return; } // still level after extra time: no more choices, straight to penalties
   }
   gamePhase = 'ended';
   sfxWhistleEnd();
@@ -1226,7 +1267,11 @@ function restartMatch() {
   resetAfterGoal(true);
   resetExtraTimeAndPenalties();
   starSpawnTimer = STAR_SPAWN_INTERVAL;
-  startPregame();
+  if (penaltiesOnlyMode) {
+    startPenaltyShootout();
+  } else {
+    startPregame();
+  }
 }
 
 function returnToMenu() {
@@ -1238,6 +1283,7 @@ function returnToMenu() {
   resetExtraTimeAndPenalties();
   starSpawnTimer = STAR_SPAWN_INTERVAL;
   gameMode = null;
+  penaltiesOnlyMode = false;
   gamePhase = 'menu';
 }
 
@@ -1466,8 +1512,10 @@ function render() {
   }
 
   if (gamePhase === 'menu') drawModeMenu();
+  if (gamePhase === 'matchTypeMenu') drawMatchTypeMenu();
   if (gamePhase === 'pregame') drawPregameOverlay();
   if (gamePhase === 'goalPause') drawGoalBanner();
+  if (gamePhase === 'extraTimeChoice') drawExtraTimeChoiceMenu();
   if (gamePhase === 'extraTimeBanner') drawExtraTimeBanner();
   if (gamePhase === 'penaltiesIntro') drawPenaltiesIntroBanner();
   if (gamePhase === 'penalties') drawPenaltyHUD();
@@ -1487,6 +1535,24 @@ function drawModeMenu() {
 
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', '1 Player — vs AI', 'Move: WASD or Arrows   Kick: J / K');
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', '2 Player', 'P1: WASD + C/V     P2: Arrows + O/P');
+
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMatchTypeMenu() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 34px Segoe UI, Arial, sans-serif';
+  ctx.fillText('Choose a match type', CANVAS_W / 2, CANVAS_H / 2 - 108);
+
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Full Match', "60s a side — extra time/penalties if it's level");
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', 'Penalties Only', 'Skip straight to a shootout, no regulation time');
 
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
@@ -1793,7 +1859,7 @@ function drawGoal(isLeft) {
 }
 
 function drawTimerBadge() {
-  if (gamePhase === 'pregame' || gamePhase === 'penaltiesIntro' || gamePhase === 'penalties') return;
+  if (gamePhase === 'menu' || gamePhase === 'matchTypeMenu' || gamePhase === 'pregame' || gamePhase === 'penaltiesIntro' || gamePhase === 'penalties') return;
   const secs = Math.ceil(matchTimeRemaining);
   const urgent = secs <= 10 && gamePhase === 'playing';
 
@@ -1859,6 +1925,24 @@ function drawGoalBanner() {
   ctx.restore();
 
   ctx.globalAlpha = 1;
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawExtraTimeChoiceMenu() {
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 30px Segoe UI, Arial, sans-serif';
+  ctx.fillText(`It's a draw, ${scoreLeft} - ${scoreRight}`, CANVAS_W / 2, CANVAS_H / 2 - 108);
+
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Extra Time', '+30 seconds — penalties only if still level after');
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', 'Penalties', 'Skip straight to a shootout');
+
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
 }
@@ -2218,10 +2302,14 @@ function drawEndedOverlay() {
   ctx.font = 'bold 24px Segoe UI, Arial, sans-serif';
   ctx.fillText(result, CANVAS_W / 2, CANVAS_H / 2);
 
-  if (inPenalties) {
+  if (inPenalties && !penaltiesOnlyMode) {
     ctx.font = '14px Segoe UI, Arial, sans-serif';
     ctx.fillStyle = '#9fcbb0';
     ctx.fillText(`Match: ${scoreLeft} - ${scoreRight}   Penalties: ${pkScores.player} - ${pkScores.opponent}`, CANVAS_W / 2, CANVAS_H / 2 + 28);
+  } else if (inPenalties && penaltiesOnlyMode) {
+    ctx.font = '14px Segoe UI, Arial, sans-serif';
+    ctx.fillStyle = '#9fcbb0';
+    ctx.fillText(`Penalties: ${pkScores.player} - ${pkScores.opponent}`, CANVAS_W / 2, CANVAS_H / 2 + 28);
   }
 
   ctx.font = '15px Segoe UI, Arial, sans-serif';
