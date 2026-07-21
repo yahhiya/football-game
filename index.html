@@ -123,6 +123,9 @@
   your opponent, or a freeze on your opponent. Camping in front of your
   own goal for too long is risky too — a ⚠ appears after 5 seconds, and
   staying past 7 gets you frozen as a penalty.
+  <br>
+  Press <strong>Escape</strong> anytime during play to pause — you can
+  resume or quit to the mode menu from there.
 </div>
 
 <script>
@@ -280,6 +283,7 @@ let gamePhase = 'menu';
 let phaseTimer = 0;
 let matchTimeRemaining = 0;
 let lastConcedingSide = null; // 'left' | 'right' — who to favor on the next kickoff
+let pausedFromPhase = null; // which phase to return to when Escape resumes
 
 // 'ai' (single player vs bot) or 'twoPlayer' (both humans). Chosen from the
 // menu before the first kickoff; controls and the opponent's brain both key
@@ -454,6 +458,16 @@ window.addEventListener('keydown', e => {
   // "pressing" the next menu's option 1 too).
   const phase = gamePhase;
 
+  if (key === 'escape') {
+    e.preventDefault();
+    togglePause();
+  }
+
+  if (phase === 'paused') {
+    if (key === '1') { e.preventDefault(); togglePause(); }
+    if (key === '2') { e.preventDefault(); returnToMenu(); }
+  }
+
   if (phase === 'menu') {
     if (key === '1') { e.preventDefault(); chooseMode('ai'); }
     if (key === '2') { e.preventDefault(); chooseMode('twoPlayer'); }
@@ -582,6 +596,10 @@ const HIGH_SHOT_SPEED = 360, HIGH_SHOT_LIFT = 660;
    UPDATE
    --------------------------------------------------------------------- */
 function update(dt) {
+  if (gamePhase === 'paused') {
+    return; // frozen — waiting on Escape (resume) or the quit option
+  }
+
   if (gamePhase === 'menu') {
     return;
   }
@@ -1283,6 +1301,18 @@ function restartMatch() {
   }
 }
 
+// Escape toggles between playing and paused. Menus and the post-match
+// screen aren't pausable — there's nothing mid-action to freeze there.
+function togglePause() {
+  if (gamePhase === 'paused') {
+    gamePhase = pausedFromPhase;
+    pausedFromPhase = null;
+  } else if (gamePhase !== 'menu' && gamePhase !== 'matchTypeMenu' && gamePhase !== 'ended') {
+    pausedFromPhase = gamePhase;
+    gamePhase = 'paused';
+  }
+}
+
 function returnToMenu() {
   scoreLeft = 0; scoreRight = 0;
   document.getElementById('scoreLeft').textContent = '0';
@@ -1293,6 +1323,7 @@ function returnToMenu() {
   starSpawnTimer = STAR_SPAWN_INTERVAL;
   gameMode = null;
   penaltiesOnlyMode = false;
+  pausedFromPhase = null;
   gamePhase = 'menu';
 }
 
@@ -1506,7 +1537,12 @@ function penaltyKeyKick(entity) {
 function render() {
   ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
-  if (gamePhase === 'penalties' || gamePhase === 'penaltiesIntro') {
+  // While paused, everything below still renders exactly as it did for
+  // whichever phase we paused from, so the pause overlay sits on top of a
+  // frozen snapshot of the game instead of blanking it out.
+  const scenePhase = gamePhase === 'paused' ? pausedFromPhase : gamePhase;
+
+  if (scenePhase === 'penalties' || scenePhase === 'penaltiesIntro') {
     drawPenaltyScene();
   } else {
     drawSky();
@@ -1516,19 +1552,21 @@ function render() {
     if (star) drawStar(star);
     drawEntitiesSorted();
     drawFloatingTexts();
-    drawTimerBadge();
-    drawStarCountdown();
+    drawTimerBadge(scenePhase);
+    drawStarCountdown(scenePhase);
   }
 
-  if (gamePhase === 'menu') drawModeMenu();
-  if (gamePhase === 'matchTypeMenu') drawMatchTypeMenu();
-  if (gamePhase === 'pregame') drawPregameOverlay();
-  if (gamePhase === 'goalPause') drawGoalBanner();
-  if (gamePhase === 'extraTimeChoice') drawExtraTimeChoiceMenu();
-  if (gamePhase === 'extraTimeBanner') drawExtraTimeBanner();
-  if (gamePhase === 'penaltiesIntro') drawPenaltiesIntroBanner();
-  if (gamePhase === 'penalties') drawPenaltyHUD();
-  if (gamePhase === 'ended') drawEndedOverlay();
+  if (scenePhase === 'menu') drawModeMenu();
+  if (scenePhase === 'matchTypeMenu') drawMatchTypeMenu();
+  if (scenePhase === 'pregame') drawPregameOverlay();
+  if (scenePhase === 'goalPause') drawGoalBanner();
+  if (scenePhase === 'extraTimeChoice') drawExtraTimeChoiceMenu();
+  if (scenePhase === 'extraTimeBanner') drawExtraTimeBanner();
+  if (scenePhase === 'penaltiesIntro') drawPenaltiesIntroBanner();
+  if (scenePhase === 'penalties') drawPenaltyHUD();
+  if (scenePhase === 'ended') drawEndedOverlay();
+
+  if (gamePhase === 'paused') drawPauseOverlay();
 }
 
 function drawModeMenu() {
@@ -1662,8 +1700,8 @@ function drawFloatingTexts() {
   ctx.textAlign = 'start';
 }
 
-function drawStarCountdown() {
-  if (gamePhase !== 'playing' || star) return;
+function drawStarCountdown(phase) {
+  if (phase !== 'playing' || star) return;
   const secs = Math.ceil(starSpawnTimer);
   ctx.font = '12px Segoe UI, Arial, sans-serif';
   ctx.fillStyle = 'rgba(234,250,240,0.7)';
@@ -1867,10 +1905,10 @@ function drawGoal(isLeft) {
   ctx.lineCap = 'butt';
 }
 
-function drawTimerBadge() {
-  if (gamePhase === 'menu' || gamePhase === 'matchTypeMenu' || gamePhase === 'pregame' || gamePhase === 'penaltiesIntro' || gamePhase === 'penalties') return;
+function drawTimerBadge(phase) {
+  if (phase === 'menu' || phase === 'matchTypeMenu' || phase === 'pregame' || phase === 'penaltiesIntro' || phase === 'penalties') return;
   const secs = Math.ceil(matchTimeRemaining);
-  const urgent = secs <= 10 && gamePhase === 'playing';
+  const urgent = secs <= 10 && phase === 'playing';
 
   const bw = 84, bh = 38, bx = CANVAS_W / 2 - bw / 2, by = 12;
   roundRectPath(bx, by, bw, bh, 9);
@@ -1888,7 +1926,7 @@ function drawTimerBadge() {
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
 
-  if (extraTimePlayed && gamePhase === 'playing') {
+  if (extraTimePlayed && phase === 'playing') {
     ctx.font = 'bold 11px Segoe UI, Arial, sans-serif';
     ctx.fillStyle = '#ffd23f';
     ctx.textAlign = 'center';
@@ -1934,6 +1972,24 @@ function drawGoalBanner() {
   ctx.restore();
 
   ctx.globalAlpha = 1;
+  ctx.textAlign = 'start';
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawPauseOverlay() {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#eafaf0';
+  ctx.font = 'bold 36px Segoe UI, Arial, sans-serif';
+  ctx.fillText('PAUSED', CANVAS_W / 2, CANVAS_H / 2 - 108);
+
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Resume', 'Or press Escape again');
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', 'Quit to Menu', 'Ends this match and returns to mode select');
+
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
 }
