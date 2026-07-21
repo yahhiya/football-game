@@ -4,128 +4,95 @@
 <meta charset="UTF-8">
 <title>Head Soccer — v6 (arcade match)</title>
 <style>
-  body {
+  * { box-sizing: border-box; }
+
+  html, body {
     margin: 0;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
     background: radial-gradient(ellipse at center, #1a3326 0%, #0a1810 100%);
     font-family: 'Segoe UI', Arial, sans-serif;
     color: #eafaf0;
   }
 
-  h1 {
-    margin: 12px 0 8px;
-    font-size: 22px;
-    letter-spacing: 1px;
+  /* Full-viewport stage: canvas is centered and scaled by JS (see
+     resizeCanvas) to fill 100vw/100vh while preserving its native
+     aspect ratio. No borders/padding/frame around it. */
+  #stage {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
   }
 
-  /* Scoreboard */
+  canvas#field {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: block;
+    background: #0d2a1c;
+    touch-action: none;
+  }
+
+  /* Scoreboard — a slim overlay pinned to the top of the viewport,
+     floating over the canvas instead of pushing it around in a
+     separate page layout. */
   #hud {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
     display: flex;
     align-items: stretch;
-    border-radius: 10px;
+    border-radius: 8px;
     overflow: hidden;
-    margin-bottom: 10px;
     box-shadow: 0 4px 14px rgba(0,0,0,0.45);
     border: 1px solid rgba(255,255,255,0.15);
+    backdrop-filter: blur(2px);
   }
   .score-block {
-    padding: 8px 22px;
+    padding: 6px 16px;
     font-weight: 800;
-    font-size: 15px;
+    font-size: 13px;
     letter-spacing: 0.5px;
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 7px;
   }
-  .score-block.blue { background: linear-gradient(160deg, #3fa7ff, #1a4a7a); }
-  .score-block.red  { background: linear-gradient(160deg, #ff5b5b, #7a1a1a); }
-  .score-num { font-size: 24px; }
+  .score-block.blue { background: linear-gradient(160deg, rgba(63,167,255,0.92), rgba(26,74,122,0.92)); }
+  .score-block.red  { background: linear-gradient(160deg, rgba(255,91,91,0.92), rgba(122,26,26,0.92)); }
+  .score-num { font-size: 19px; }
 
   #muteBtn {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 0 16px;
-    background: rgba(255,255,255,0.06);
+    padding: 0 14px;
+    background: rgba(0,0,0,0.35);
     border: none;
     border-left: 1px solid rgba(255,255,255,0.15);
     color: #eafaf0;
-    font-size: 18px;
+    font-size: 16px;
     cursor: pointer;
   }
   #muteBtn:hover { background: rgba(255,255,255,0.14); }
-
-  #instructions {
-    margin-top: 8px;
-    font-size: 13px;
-    color: #9fcbb0;
-    max-width: 720px;
-    text-align: center;
-  }
-
-  #arcade-frame {
-    padding: 14px;
-    background: linear-gradient(155deg, #2b2b2b, #0f0f0f);
-    border-radius: 16px;
-    box-shadow:
-      0 0 0 2px rgba(255,255,255,0.06),
-      0 16px 40px rgba(0,0,0,0.55),
-      inset 0 1px 0 rgba(255,255,255,0.08);
-  }
-
-  canvas {
-    display: block;
-    width: 1000px;
-    height: 480px;
-    background: #0d2a1c;
-    border-radius: 6px;
-    box-shadow: inset 0 0 24px rgba(0,0,0,0.6);
-  }
 </style>
 </head>
 <body>
 
-<h1>⚽ Head Soccer — v6</h1>
-<div id="hud">
-  <div class="score-block blue">BLUE <span class="score-num" id="scoreLeft">0</span></div>
-  <div class="score-block red">RED <span class="score-num" id="scoreRight">0</span></div>
-  <button id="muteBtn" title="Toggle sound">🔊</button>
-</div>
+<div id="stage">
+  <div id="hud">
+    <div class="score-block blue">BLUE <span class="score-num" id="scoreLeft">0</span></div>
+    <div class="score-block red">RED <span class="score-num" id="scoreRight">0</span></div>
+    <button id="muteBtn" title="Toggle sound">🔊</button>
+  </div>
 
-<div id="arcade-frame">
   <canvas id="field" width="1000" height="480"></canvas>
-</div>
-
-<div id="instructions">
-  <strong>Click the field once to give it keyboard focus,</strong> then press
-  1 or 2 on the mode menu, then 1 or 2 again to play a full match or jump
-  straight to penalties.
-  <br>
-  <strong>1 Player (vs AI):</strong> WASD or Arrows to move, J = low kick, K = high kick.
-  <br>
-  <strong>2 Player:</strong> Player 1 — WASD to move, C = low kick, V = high kick.
-  Player 2 — Arrow keys to move, O = low kick, P = high kick.
-  <br>
-  First to lead when the 60-second clock runs out wins. If it's level,
-  press 1 or 2 to choose extra time (+30 seconds, then penalties only if
-  still level) or go straight to a penalty shootout — a face-on view
-  where the shooter moves the reticle to a zone (left/right to pick a
-  side, up/down for low or a harder-to-stop high corner) and kicks,
-  while the keeper moves the same way to dive toward a side and reach
-  high or stay low. Press R to play again, or M for the mode menu, after
-  full time.
-  A ⭐ power-up star spawns every 10 seconds — kick the ball into it to grab
-  a random buff: a taller goal, a speed boost, a giant player, shrinking
-  your opponent, or a freeze on your opponent. Camping in front of your
-  own goal for too long is risky too — a ⚠ appears after 5 seconds, and
-  staying past 7 gets you frozen as a penalty.
-  <br>
-  Press <strong>Escape</strong> anytime during play to pause — you can
-  resume or quit to the mode menu from there.
 </div>
 
 <script>
@@ -139,6 +106,30 @@ const ctx = canvas.getContext('2d');
 
 const CANVAS_W = canvas.width;   // 1000 — wide arcade viewport
 const CANVAS_H = canvas.height;  // 480
+
+// ---- Responsive scaling: the canvas keeps its native 1000x480 drawing
+// resolution (so all game-logic coordinates stay untouched), but its
+// on-screen CSS size is recalculated to fill as much of the viewport
+// as possible while preserving that aspect ratio — no cropping, no
+// letterbox bars baked into fixed dimensions, no scrollbars. ----
+function resizeCanvas() {
+  const aspect = CANVAS_W / CANVAS_H;
+  const viewportW = window.innerWidth;
+  const viewportH = window.innerHeight;
+  let displayW, displayH;
+  if (viewportW / viewportH > aspect) {
+    displayH = viewportH;
+    displayW = displayH * aspect;
+  } else {
+    displayW = viewportW;
+    displayH = displayW / aspect;
+  }
+  canvas.style.width = displayW + 'px';
+  canvas.style.height = displayH + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', resizeCanvas);
+resizeCanvas();
 
 // ---- Pitch layout: wide, with short goals and lots of open sky so
 // there's real room to move and defend ----
@@ -1583,8 +1574,28 @@ function drawModeMenu() {
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', '1 Player — vs AI', 'Move: WASD or Arrows   Kick: J / K');
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', '2 Player', 'P1: WASD + C/V     P2: Arrows + O/P');
 
+  drawControlsGuide(CANVAS_H / 2 + 128);
+
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
+}
+
+// A compact controls/rules guide shown only on the menu screen, so the
+// gameplay canvas itself stays completely uncluttered.
+const CONTROLS_GUIDE_LINES = [
+  'Click once to focus, then press 1 or 2 to pick a match type',
+  '⭐ Power-ups spawn every 10s — kick the ball into one for a random buff',
+  '⚠ Don\u2019t camp your own goal too long or you\u2019ll be frozen for a penalty',
+  'Esc to pause   \u2022   R to rematch   \u2022   M for this menu, once a match ends'
+];
+
+function drawControlsGuide(startY) {
+  ctx.font = '13px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#9fcbb0';
+  ctx.textAlign = 'center';
+  CONTROLS_GUIDE_LINES.forEach((line, i) => {
+    ctx.fillText(line, CANVAS_W / 2, startY + i * 19);
+  });
 }
 
 function drawMatchTypeMenu() {
@@ -1600,6 +1611,11 @@ function drawMatchTypeMenu() {
 
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Full Match', "60s a side — extra time/penalties if it's level");
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', 'Penalties Only', 'Skip straight to a shootout, no regulation time');
+
+  ctx.font = '13px Segoe UI, Arial, sans-serif';
+  ctx.fillStyle = '#9fcbb0';
+  ctx.fillText("If it's level, choose +30s extra time or go straight to penalties", CANVAS_W / 2, CANVAS_H / 2 + 128);
+  ctx.fillText('Penalties: left/right picks a side, up/down picks low or high', CANVAS_W / 2, CANVAS_H / 2 + 147);
 
   ctx.textAlign = 'start';
   ctx.textBaseline = 'alphabetic';
