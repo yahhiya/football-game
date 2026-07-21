@@ -274,7 +274,7 @@ let gamePhase = 'menu';
 let phaseTimer = 0;
 let matchTimeRemaining = 0;
 let lastConcedingSide = null; // 'left' | 'right' — who to favor on the next kickoff
-let pausedFromPhase = null; // which phase to return to when Escape resumes
+let pausedFromPhase = null; // which phase to return to when 0 resumes
 
 // 'ai' (single player vs bot) or 'twoPlayer' (both humans). Chosen from the
 // menu before the first kickoff; controls and the opponent's brain both key
@@ -449,7 +449,7 @@ window.addEventListener('keydown', e => {
   // "pressing" the next menu's option 1 too).
   const phase = gamePhase;
 
-  if (key === 'escape') {
+  if (key === '0') {
     e.preventDefault();
     togglePause();
   }
@@ -588,7 +588,7 @@ const HIGH_SHOT_SPEED = 360, HIGH_SHOT_LIFT = 660;
    --------------------------------------------------------------------- */
 function update(dt) {
   if (gamePhase === 'paused') {
-    return; // frozen — waiting on Escape (resume) or the quit option
+    return; // frozen — waiting on 0 (resume) or the quit option
   }
 
   if (gamePhase === 'menu') {
@@ -1292,7 +1292,7 @@ function restartMatch() {
   }
 }
 
-// Escape toggles between playing and paused. Menus and the post-match
+// 0 toggles between playing and paused. Menus and the post-match
 // screen aren't pausable — there's nothing mid-action to freeze there.
 function togglePause() {
   if (gamePhase === 'paused') {
@@ -1586,7 +1586,7 @@ const CONTROLS_GUIDE_LINES = [
   'Click once to focus, then press 1 or 2 to pick a match type',
   '⭐ Power-ups spawn every 10s — kick the ball into one for a random buff',
   '⚠ Don\u2019t camp your own goal too long or you\u2019ll be frozen for a penalty',
-  'Esc to pause   \u2022   R to rematch   \u2022   M for this menu, once a match ends'
+  '0 to pause   \u2022   R to rematch   \u2022   M for this menu, once a match ends'
 ];
 
 function drawControlsGuide(startY) {
@@ -2003,7 +2003,7 @@ function drawPauseOverlay() {
   ctx.font = 'bold 36px Segoe UI, Arial, sans-serif';
   ctx.fillText('PAUSED', CANVAS_W / 2, CANVAS_H / 2 - 108);
 
-  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Resume', 'Or press Escape again');
+  drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 - 34, '1', 'Resume', 'Or press 0 again');
   drawMenuOption(CANVAS_W / 2, CANVAS_H / 2 + 62, '2', 'Quit to Menu', 'Ends this match and returns to mode select');
 
   ctx.textAlign = 'start';
