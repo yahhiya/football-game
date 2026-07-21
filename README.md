@@ -28,7 +28,7 @@ An action-packed 2D web arcade football game built with HTML5 Canvas, pure JavaS
 | **Low Kick** | `C` | `O` |
 | **High Kick** | `V` | `P` |
 
-* **Pause Game:** `Escape`
+* **Pause Game:** `P`
 * **Post-Match Menu:** Press `R` to Rematch or `M` to Return to Main Menu.
 
 ---
